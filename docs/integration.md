@@ -56,7 +56,7 @@ http://localhost:5174/phogaem/ 에서 ‘공유보관함 연결’ → ‘이 �
 
 ## 후속 단계
 
-운영 백엔드 배포를 완료했다. 전용 DB 역할·스키마와 원본 디렉터리를 사용하고, Phogaem만 시스템 자동 실행 서비스로 등록했다. 기존 코어·Postgres·OCR·roster 프로세스는 재시작하지 않았다. GitHub Pages 배포와 R2 전환은 후속 단계다.
+운영 백엔드와 GitHub Pages 배포를 완료했다. 전용 DB 역할·스키마와 원본 디렉터리를 사용하고, Phogaem만 시스템 자동 실행 서비스로 등록했다. 기존 코어·Postgres·OCR·roster 프로세스는 재시작하지 않았다. R2 전환은 후속 단계다. 공개 사이트와 배포 절차는 [Pages 안내](pages.md)를 따른다.
 
 ### 운영 배포 검증
 
