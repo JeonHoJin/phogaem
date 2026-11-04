@@ -1,0 +1,41 @@
+{
+  "name": "phogaem",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint apps/web/src tests vite.config.ts playwright.config.ts playwright.shared.config.ts",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:e2e": "playwright test",
+    "test:shared": "python3 scripts/dev-mlhops.py --test",
+    "dev:server": "python3 scripts/dev-mlhops.py",
+    "test:vision": "python3 -m unittest discover -s tests -p test_vision_probe.py -v",
+    "probe:fixtures": "node scripts/generate-vision-fixtures.mjs",
+    "probe:vision": "python3 scripts/vision-probe.py --fixtures .local/gemma-vision/fixtures/manifest.json --limit-pairs 5"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "eslint": "^10.14.0",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.72.1",
+    "vite": "^8.3.5"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1"
+  }
+}

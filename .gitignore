@@ -1,0 +1,23 @@
+# Local secrets and configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Runtime data, originals and generated files
+.local/
+node_modules/
+dist/
+coverage/
+test-results/
+playwright-report/
+target/
+.DS_Store
+
+# Agent runtime is local; product plans live in docs/
+.omx/
+
+# Python development harness
+__pycache__/
+*.pyc

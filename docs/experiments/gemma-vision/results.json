@@ -1,0 +1,419 @@
+{
+  "date": "2026-11-04",
+  "model": "google/gemma-4-e4b",
+  "endpoint_type": "existing local LM Studio native API, reasoning off, store false",
+  "settings": {
+    "max_tokens": 256,
+    "structured": false,
+    "temperature": 0,
+    "reasoning_effort": null,
+    "api": "native",
+    "native_reasoning": "off"
+  },
+  "limitations": [
+    "Only synthetic illustrations, no real travel-photo accuracy claim.",
+    "Expected relations are human-assigned fixture expectations, not calibrated labels.",
+    "Pair output JSON code fences were normalized offline with the final strict wrapper-aware parser; original raw results are retained in .local.",
+    "Caption descriptors are not image embeddings and do not prove image identity.",
+    "Cache identity currently uses model identifier, prompt version, settings and byte hash; changing weights behind the same model alias requires invalidation."
+  ],
+  "smoke": {
+    "thinking_on": {
+      "elapsed_s": 17.163,
+      "max_tokens": 256,
+      "finish_reason": "length",
+      "final_content_empty": true
+    },
+    "thinking_off": {
+      "elapsed_s": 2.173,
+      "content": "On a sunny beach scene with the sea, two people stand near a red and white umbrella."
+    }
+  },
+  "descriptor_summary": {
+    "count": 6,
+    "successful": 6,
+    "median_s": 5.138,
+    "min_s": 3.718,
+    "max_s": 5.812
+  },
+  "descriptors": [
+    {
+      "id": "beach",
+      "sha256": "61f0e9df7a1f28a9eb128b85a1c250a20523418ef5aa946f7216ac50476b120d",
+      "expected": {
+        "scene": "beach",
+        "people": 2,
+        "umbrellaColor": "red"
+      },
+      "parsed": {
+        "scene": "A beach scene on a sunny day with the ocean in the background.",
+        "people": 2,
+        "objects": [
+          "beach umbrella",
+          "sailboat"
+        ],
+        "layout": "Two small figures stand on the sand in the foreground, with a beach umbrella to their left and the ocean stretching out behind them where a sailboat is visible.",
+        "distinctive_details": [
+          "The sky is light blue with one white cloud, and a yellow sun is in the upper right. The ocean has horizontal bands of blue. The umbrella is red and white."
+        ]
+      },
+      "elapsed_s": 5.08
+    },
+    {
+      "id": "jpeg_copy",
+      "sha256": "5995ca083cf1f6a6f4c83905932a708135214d6eace108b82a393f5f07bffd9c",
+      "expected": {
+        "scene": "beach",
+        "people": 2,
+        "umbrellaColor": "red"
+      },
+      "parsed": {
+        "scene": "A beach scene with the ocean, sky, and sun",
+        "people": 2,
+        "objects": [
+          "beach umbrella",
+          "sailboat"
+        ],
+        "layout": "The umbrella is on the sand in the foreground, with two small figures nearby. The ocean stretches out behind them under a blue sky with a sun in the upper right and a cloud in the upper left. A sailboat is on the water in the middle ground.",
+        "distinctive_details": [
+          "The umbrella is red and white, providing shade on the sand."
+        ]
+      },
+      "elapsed_s": 5.604
+    },
+    {
+      "id": "crop",
+      "sha256": "a1ab4378905adf4dd15147341f89e838435a93f38a8e152910a1a271153af426",
+      "expected": {
+        "scene": "beach",
+        "people": 2,
+        "umbrellaColor": "red"
+      },
+      "parsed": {
+        "scene": "beach scene with ocean and sky",
+        "people": 2,
+        "objects": [
+          "umbrella",
+          "sailboat"
+        ],
+        "layout": "two small figures stand on the sand in the foreground, a red and white umbrella is to their left, the ocean stretches behind them with a sailboat on it, and the sun is in the upper right sky",
+        "distinctive_details": [
+          "a small white cloud is in the upper left sky"
+        ]
+      },
+      "elapsed_s": 4.679
+    },
+    {
+      "id": "burst_changed_people",
+      "sha256": "f243731fc4a005631db3b09646d4d9d29a9fe6820c35b15144cd137ff42b1355",
+      "expected": {
+        "scene": "beach",
+        "people": 3,
+        "umbrellaColor": "red"
+      },
+      "parsed": {
+        "scene": "beach scene with ocean and sun",
+        "people": 3,
+        "objects": [
+          "umbrella",
+          "sailboat"
+        ],
+        "layout": "three figures standing on sand facing the ocean, umbrella in foreground left, sailboat on water",
+        "distinctive_details": [
+          "clear blue sky with one cloud",
+          "large yellow sun in upper right"
+        ]
+      },
+      "elapsed_s": 3.718
+    },
+    {
+      "id": "different_beach",
+      "sha256": "18db985da50566091a2b0ba2594810c2647930567f4f320e3a7ce2d53182f4c2",
+      "expected": {
+        "scene": "beach",
+        "people": 2,
+        "umbrellaColor": "orange"
+      },
+      "parsed": {
+        "scene": "A beach scene with the ocean, sky, and sand.",
+        "people": 2,
+        "objects": [
+          "sailboat",
+          "beach umbrella"
+        ],
+        "layout": "Two small figures stand on the sand in the foreground. A beach umbrella is to their right. The ocean stretches across the middle ground, with a sailboat on the water to the left. A large sun is in the upper right sky, and a small cloud is in the upper left sky.",
+        "distinctive_details": [
+          "The ocean has horizontal bands of blue suggesting waves or distance."
+        ]
+      },
+      "elapsed_s": 5.812
+    },
+    {
+      "id": "mountain",
+      "sha256": "57958f645eb257c65fbda0bc232b5d8510a3049b04af28b3a39e24e5f6b8834f",
+      "expected": {
+        "scene": "mountain",
+        "people": 0,
+        "umbrellaColor": "none"
+      },
+      "parsed": {
+        "scene": "A stylized landscape with mountains, trees, and a small house.",
+        "people": 0,
+        "objects": [
+          "mountains",
+          "trees",
+          "house"
+        ],
+        "layout": "The mountains form a backdrop, with the house centered in the middle ground and trees flanking it on both sides.",
+        "distinctive_details": [
+          "The mountains are depicted in shades of blue-gray with a snow-capped peak on the larger mountain. The house has a brown roof and walls."
+        ]
+      },
+      "elapsed_s": 5.195
+    }
+  ],
+  "pairs": [
+    {
+      "a": "beach",
+      "b": "jpeg_copy",
+      "expected": "same_photo",
+      "baselines": {
+        "sha256_equal": false,
+        "dhash_hamming": 5
+      },
+      "descriptor_comparison": {
+        "parsed": {
+          "relation": "similar_scene",
+          "reason": "Both scenes depict a beach with two people, an umbrella, and a sailboat under a sunny sky."
+        },
+        "elapsed_s": 2.516,
+        "output_wrapper": "json_fence",
+        "original_strict_parser_ok": false,
+        "usage": {
+          "input_tokens": 361,
+          "total_output_tokens": 43,
+          "reasoning_output_tokens": 0,
+          "tokens_per_second": 23.002822812264434,
+          "time_to_first_token_seconds": 0.625
+        }
+      },
+      "direct_comparison": {
+        "parsed": {
+          "relation": "same_photo",
+          "reason": "Both images depict the exact same scene: two figures on a beach with an umbrella, looking out at the sea where a sailboat is present under a bright sun."
+        },
+        "elapsed_s": 4.631,
+        "output_wrapper": "json_fence",
+        "original_strict_parser_ok": false,
+        "usage": {
+          "input_tokens": 133,
+          "total_output_tokens": 57,
+          "reasoning_output_tokens": 0,
+          "tokens_per_second": 22.702047475756356,
+          "time_to_first_token_seconds": 2.078
+        }
+      }
+    },
+    {
+      "a": "beach",
+      "b": "crop",
+      "expected": "same_photo",
+      "baselines": {
+        "sha256_equal": false,
+        "dhash_hamming": 9
+      },
+      "descriptor_comparison": {
+        "parsed": {
+          "relation": "similar_scene",
+          "reason": "Both depict a beach scene with two people, an umbrella, and a sailboat, but the cloud placement differs."
+        },
+        "elapsed_s": 2.57,
+        "output_wrapper": "json_fence",
+        "original_strict_parser_ok": false,
+        "usage": {
+          "input_tokens": 342,
+          "total_output_tokens": 45,
+          "reasoning_output_tokens": 0,
+          "tokens_per_second": 22.817221163203442,
+          "time_to_first_token_seconds": 0.579
+        }
+      },
+      "direct_comparison": {
+        "parsed": {
+          "relation": "same_photo",
+          "reason": "Both images depict the exact same scene: two people on a beach with an umbrella, the ocean, and a sailboat under a bright sun."
+        },
+        "elapsed_s": 4.388,
+        "output_wrapper": "json_fence",
+        "original_strict_parser_ok": false,
+        "usage": {
+          "input_tokens": 133,
+          "total_output_tokens": 53,
+          "reasoning_output_tokens": 0,
+          "tokens_per_second": 22.77068667207542,
+          "time_to_first_token_seconds": 2.005
+        }
+      }
+    },
+    {
+      "a": "beach",
+      "b": "burst_changed_people",
+      "expected": "similar_scene",
+      "baselines": {
+        "sha256_equal": false,
+        "dhash_hamming": 0
+      },
+      "descriptor_comparison": {
+        "parsed": {
+          "relation": "similar_scene",
+          "reason": "Both depict a beach scene with an ocean and sun, but B has one more person."
+        },
+        "elapsed_s": 2.012,
+        "output_wrapper": "json_fence",
+        "original_strict_parser_ok": false,
+        "usage": {
+          "input_tokens": 322,
+          "total_output_tokens": 41,
+          "reasoning_output_tokens": 0,
+          "tokens_per_second": 22.97099682445186,
+          "time_to_first_token_seconds": 0.209
+        }
+      },
+      "direct_comparison": {
+        "parsed": {
+          "relation": "similar_scene",
+          "reason": "Both images depict a beach scene with the same elements (umbrella, ocean, sailboat) but differ in the number of people present."
+        },
+        "elapsed_s": 4.303,
+        "output_wrapper": "json_fence",
+        "original_strict_parser_ok": false,
+        "usage": {
+          "input_tokens": 133,
+          "total_output_tokens": 51,
+          "reasoning_output_tokens": 0,
+          "tokens_per_second": 22.605139245164537,
+          "time_to_first_token_seconds": 1.998
+        }
+      }
+    },
+    {
+      "a": "beach",
+      "b": "different_beach",
+      "expected": "different",
+      "baselines": {
+        "sha256_equal": false,
+        "dhash_hamming": 7
+      },
+      "descriptor_comparison": {
+        "parsed": {
+          "relation": "similar_scene",
+          "reason": "Both scenes depict two people on a beach with an ocean background, a sailboat, and a beach umbrella."
+        },
+        "elapsed_s": 2.19,
+        "output_wrapper": "json_fence",
+        "original_strict_parser_ok": false,
+        "usage": {
+          "input_tokens": 366,
+          "total_output_tokens": 44,
+          "reasoning_output_tokens": 0,
+          "tokens_per_second": 22.94000941662361,
+          "time_to_first_token_seconds": 0.254
+        }
+      },
+      "direct_comparison": {
+        "parsed": {
+          "relation": "similar_scene",
+          "reason": "Both images depict a beach scene with people, an umbrella, and the ocean, but the objects are mirrored or swapped positions."
+        },
+        "elapsed_s": 4.269,
+        "output_wrapper": "json_fence",
+        "original_strict_parser_ok": false,
+        "usage": {
+          "input_tokens": 133,
+          "total_output_tokens": 50,
+          "reasoning_output_tokens": 0,
+          "tokens_per_second": 22.491901794132808,
+          "time_to_first_token_seconds": 1.999
+        }
+      }
+    },
+    {
+      "a": "beach",
+      "b": "mountain",
+      "expected": "different",
+      "baselines": {
+        "sha256_equal": false,
+        "dhash_hamming": 13
+      },
+      "descriptor_comparison": {
+        "parsed": {
+          "relation": "different",
+          "reason": "The scenes depict entirely different subjects: a beach versus mountains with a house."
+        },
+        "elapsed_s": 2.163,
+        "output_wrapper": "json_fence",
+        "original_strict_parser_ok": false,
+        "usage": {
+          "input_tokens": 352,
+          "total_output_tokens": 36,
+          "reasoning_output_tokens": 0,
+          "tokens_per_second": 22.94807185997469,
+          "time_to_first_token_seconds": 0.579
+        }
+      },
+      "direct_comparison": {
+        "parsed": {
+          "relation": "different",
+          "reason": "Image A depicts a beach scene with the ocean, while Image B shows a mountain landscape with a house."
+        },
+        "elapsed_s": 3.976,
+        "output_wrapper": "json_fence",
+        "original_strict_parser_ok": false,
+        "usage": {
+          "input_tokens": 133,
+          "total_output_tokens": 44,
+          "reasoning_output_tokens": 0,
+          "tokens_per_second": 22.810412616387374,
+          "time_to_first_token_seconds": 2.002
+        }
+      }
+    }
+  ],
+  "cached_replay": {
+    "images": 6,
+    "descriptor_cache_hits": 6,
+    "successful_descriptors": 6,
+    "inference_calls": 0,
+    "pairs": 0,
+    "halted_after_timeout": false
+  },
+  "incremental": {
+    "summary": {
+      "images": 7,
+      "descriptor_cache_hits": 6,
+      "successful_descriptors": 7,
+      "inference_calls": 1,
+      "pairs": 0,
+      "halted_after_timeout": false
+    },
+    "new_image": [
+      {
+        "id": "new_arrival",
+        "parsed": {
+          "scene": "A beach scene on a sunny day",
+          "people": 1,
+          "objects": [
+            "sailboat",
+            "beach umbrella"
+          ],
+          "layout": "The sailboat is on the water to the left, and the beach umbrella is in the middle ground on the sand. A single person stands on the sand to the left of the umbrella. The ocean stretches across the middle ground under a blue sky with one cloud and the sun visible in the upper right.",
+          "distinctive_details": [
+            "The sailboat is small and white, with a sail up. The umbrella is orange and provides shade on the sand."
+          ]
+        },
+        "elapsed_s": 6.362,
+        "cache_hit": false
+      }
+    ]
+  }
+}

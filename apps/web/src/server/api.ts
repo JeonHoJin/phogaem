@@ -1,0 +1,172 @@
+import { server, ServerError } from './index.ts';
+
+export interface Album { id: string; title: string; createdAt: number }
+export interface SharedMember { id: string; name: string; color: string }
+export interface RemotePhoto {
+  id: string;
+  name: string;
+  type: string;
+  size: number;
+  hash: string;
+  createdAt: number;
+  contributors: string[];
+  requestedBy: string[];
+  receivedBy: string[];
+  importCount: number;
+}
+export interface SharedAlbum { album: Album; members: SharedMember[]; photos: RemotePhoto[] }
+
+export const SHARED_MAX_FILE_SIZE = 16 * 1024 * 1024;
+
+/** Account approval is enforced by the core before the sidecar is called. */
+export class ApprovalRequired extends ServerError {
+  readonly accountCode: string;
+  constructor(userId?: string) {
+    super(403, '관리자 승인이 필요한 계정이에요. 기존에 승인받은 계정이라면 패스키로 연결해 주세요.');
+    this.name = 'ApprovalRequired';
+    this.accountCode = userId?.replace(/-/g, '').slice(0, 8) ?? '';
+  }
+}
+
+async function checked(response: Response): Promise<Response> {
+  if (response.ok) return response;
+  const data = await response.json().catch(() => ({})) as { error?: string };
+  if (response.status === 403 && data.error === 'approval required') {
+    throw new ApprovalRequired(server.userId);
+  }
+  const messages: Record<number, string> = {
+    401: '로그인 확인이 필요해요. 다시 연결해 주세요.',
+    403: '이 작업을 할 권한이 없어요.',
+    404: '보관함이나 사진을 찾을 수 없어요. 서버 기능이 준비되었는지도 확인해 주세요.',
+    410: '초대가 만료됐어요. 새 초대를 받아 주세요.',
+    413: '공유 사진은 파일당 최대 16MB까지 올릴 수 있어요.',
+    429: '요청이 잠시 몰렸어요. 잠시 후 다시 시도해 주세요.',
+    503: '공유 서버가 아직 준비되지 않았어요. 잠시 후 다시 연결해 주세요.',
+  };
+  const context = messages[response.status] ?? '서버 작업을 완료하지 못했어요.';
+  throw new ServerError(response.status, `${context}${data.error ? ` (${data.error})` : ''}`);
+}
+
+async function json<T>(name: string, body?: unknown, query?: Record<string, string>, method = body === undefined ? 'GET' : 'POST'): Promise<T> {
+  const response = await server.op(`phogaem-${name}`, {
+    version: 'v1', method, query,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+  });
+  return (await checked(response)).json() as Promise<T>;
+}
+
+export function listAlbums(): Promise<{ userId: string; albums: Album[] }> {
+  return json('albums');
+}
+
+export async function createAlbum(title: string): Promise<Album> {
+  return (await json<{ album: Album }>('album-create', { title })).album;
+}
+
+export function getAlbum(albumId: string): Promise<SharedAlbum> {
+  return json('album-get', undefined, { albumId });
+}
+
+export function createInvite(albumId: string): Promise<{ token: string; expiresAt: number }> {
+  return json('invite-create', { albumId });
+}
+
+export async function joinInvite(token: string): Promise<Album> {
+  return (await json<{ album: Album }>('invite-join', { token })).album;
+}
+
+function fileType(file: File): string {
+  if (file.type) return file.type;
+  const ext = file.name.split('.').at(-1)?.toLowerCase();
+  return ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', avif: 'image/avif', heic: 'image/heic', heif: 'image/heif' } as Record<string, string>)[ext ?? ''] ?? 'application/octet-stream';
+}
+
+export function validateSharedFiles(files: File[]): void {
+  for (const file of files) {
+    if (!file.size) throw new Error(`${file.name}: 비어 있는 파일이에요.`);
+    if (file.size > SHARED_MAX_FILE_SIZE) throw new Error(`${file.name}: 공유 사진은 파일당 최대 16MB까지 올릴 수 있어요.`);
+    if (/svg/i.test(file.type) || /\.svgz?$/i.test(file.name)) throw new Error(`${file.name}: SVG 파일은 올릴 수 없어요.`);
+    if ([...file.name].length > 200 || [...file.name].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127 || char === '/' || char === '\\')) throw new Error('사진 파일 이름에 사용할 수 없는 문자가 있어요.');
+    if (!/^image\/(jpeg|png|webp|gif|avif|heic|heif|heic-sequence|heif-sequence)$/i.test(fileType(file)) && !/\.(jpe?g|png|webp|gif|avif|heic|heif)$/i.test(file.name)) {
+      throw new Error(`${file.name}: 지원하는 사진 파일을 선택해 주세요.`);
+    }
+  }
+}
+
+export async function uploadSharedPhotos(albumId: string, files: File[]): Promise<{ added: number; duplicates: number }> {
+  // Validate the entire batch before making requests. Uploads themselves commit per original.
+  validateSharedFiles(files);
+  let added = 0;
+  let duplicates = 0;
+  for (const file of files) {
+    try {
+      const response = await server.op('phogaem-photo-upload', {
+        version: 'v1', method: 'POST', query: { albumId, name: file.name },
+        headers: { 'content-type': fileType(file) }, body: file,
+      });
+      const result = await (await checked(response)).json() as { added: boolean };
+      if (result.added) added += 1;
+      else duplicates += 1;
+    } catch (error) {
+      if (added + duplicates) {
+        const message = error instanceof Error ? error.message : '업로드를 완료하지 못했어요.';
+        throw new Error(`${added}장 추가 · 중복 ${duplicates}장 처리 후 중단됐어요. 새로고침해 결과를 확인해 주세요. ${message}`, { cause: error });
+      }
+      throw error;
+    }
+  }
+  return { added, duplicates };
+}
+
+interface OriginalResult { response: Response; blob?: Blob }
+const originalQueue: Array<{ run: () => Promise<OriginalResult>; resolve: (value: OriginalResult) => void; reject: (reason: unknown) => void }> = [];
+let activeOriginals = 0;
+let nextOriginalStart = 0;
+let originalTimer: ReturnType<typeof setTimeout> | undefined;
+
+function pumpOriginalQueue(): void {
+  if (originalTimer !== undefined || activeOriginals >= 2 || !originalQueue.length) return;
+  const wait = Math.max(0, nextOriginalStart - Date.now());
+  if (wait) {
+    originalTimer = setTimeout(() => { originalTimer = undefined; pumpOriginalQueue(); }, wait);
+    return;
+  }
+  const task = originalQueue.shift()!;
+  activeOriginals += 1;
+  nextOriginalStart = Date.now() + 350;
+  task.run().then(task.resolve, task.reject).finally(() => { activeOriginals -= 1; pumpOriginalQueue(); });
+  pumpOriginalQueue();
+}
+
+function queuedOriginal(run: () => Promise<OriginalResult>): Promise<OriginalResult> {
+  return new Promise((resolve, reject) => { originalQueue.push({ run, resolve, reject }); pumpOriginalQueue(); });
+}
+
+function retryDelay(response: Response): number {
+  const value = response.headers.get('retry-after');
+  const seconds = value === null ? Number.NaN : Number(value);
+  const delay = Number.isFinite(seconds) ? seconds * 1000 : value ? Date.parse(value) - Date.now() : 1000;
+  return Math.min(3000, Math.max(350, Number.isFinite(delay) ? delay : 1000));
+}
+
+export async function getPhotoBlob(albumId: string, photoId: string): Promise<Blob> {
+  // The gateway allows 5 requests/sec per IP. Pace originals and keep at most two in flight;
+  // metadata and mutations stay outside this queue. Only this idempotent GET retries a 429.
+  for (let attempt = 0; ; attempt += 1) {
+    const { response, blob } = await queuedOriginal(async () => {
+      const response = await server.op('phogaem-photo-get', { version: 'v1', method: 'GET', query: { albumId, photoId } });
+      return { response, blob: response.ok ? await response.blob() : undefined };
+    });
+    if (response.status === 429 && attempt === 0) {
+      await new Promise(resolve => setTimeout(resolve, retryDelay(response)));
+      continue;
+    }
+    await checked(response);
+    return blob!;
+  }
+}
+
+export async function setSharedDownloadState(albumId: string, photoIds: string[], state: 'requested' | 'received' | 'reset'): Promise<void> {
+  await json('download-state', { albumId, photoIds, state });
+}

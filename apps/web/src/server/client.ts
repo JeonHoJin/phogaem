@@ -1,0 +1,200 @@
+// Adapted from schedule-parser/apps/mobile/src/server/client.ts (mlhops device-key contract).
+/**
+ * mlhops 서버 클라이언트: 기기 키 로그인 + op 호출.
+ *
+ * 기기 키(ECDSA P-256)는 기기 밖으로 나가지 않는다. 서버는 공개키만 알고, 1회용 챌린지에
+ * 대한 서명으로 이 기기임을 확인한 뒤 짧게 쓰는 토큰을 준다. 토큰은 메모리에만 두고
+ * 새로고침하면 기기 키로 다시 받는다 — 저장소에 토큰이 남지 않게 하려는 것.
+ */
+
+export interface KeyStore {
+  get(): Promise<CryptoKeyPair | undefined>
+  put(keys: CryptoKeyPair): Promise<void>
+}
+
+export class ServerError extends Error {
+  readonly status: number
+  constructor(status: number, message: string) {
+    super(message)
+    this.status = status
+    this.name = 'ServerError'
+  }
+}
+
+interface Session {
+  token: string
+  userId: string
+  refreshAt: number
+}
+
+export interface ClientOptions {
+  base: string
+  store: KeyStore
+  fetch?: typeof fetch
+  subtle?: SubtleCrypto
+  now?: () => number
+}
+
+const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' } as const
+const SIGN = { name: 'ECDSA', hash: 'SHA-256' } as const
+
+export function fromBase64url(text: string): Uint8Array {
+  const b64 = text.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((text.length + 3) % 4)
+  const raw = atob(b64)
+  const out = new Uint8Array(raw.length)
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i)
+  return out
+}
+
+export function base64url(bytes: ArrayBuffer | Uint8Array): string {
+  let s = ''
+  for (const b of new Uint8Array(bytes)) s += String.fromCharCode(b)
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+export class ServerClient {
+  private session?: Session
+  private pending?: Promise<Session>
+  private readonly fetch: typeof fetch
+  private readonly subtle: SubtleCrypto
+  private readonly now: () => number
+
+  private readonly opts: ClientOptions
+
+  constructor(opts: ClientOptions) {
+    this.opts = opts
+    this.fetch = opts.fetch ?? globalThis.fetch.bind(globalThis)
+    this.subtle = opts.subtle ?? globalThis.crypto.subtle
+    this.now = opts.now ?? Date.now
+  }
+
+  get userId(): string | undefined {
+    return this.session?.userId
+  }
+
+  /** 이 기기가 한 번이라도 로그인해서 기기 키를 갖고 있는지. 키를 만들지 않는다. */
+  async hasIdentity(): Promise<boolean> {
+    return Boolean(await this.opts.store.get())
+  }
+
+  private async deviceKeys(): Promise<CryptoKeyPair> {
+    const existing = await this.opts.store.get()
+    if (existing) return existing
+    // extractable=false: 개인키는 이 브라우저 밖으로 내보낼 수 없다
+    const keys = await this.subtle.generateKey(ECDSA, false, ['sign', 'verify']) as CryptoKeyPair
+    await this.opts.store.put(keys)
+    return keys
+  }
+
+  /** Clears the in-memory token only; the device key remains this device's identity. */
+  resetSession(): void {
+    this.session = undefined
+  }
+
+  private async send(path: string, init: RequestInit): Promise<Response> {
+    try {
+      return await this.fetch(this.opts.base + path, init)
+    } catch {
+      throw new ServerError(0, '서버에 연결하지 못했어요. 네트워크와 서버 상태를 확인해 주세요.')
+    }
+  }
+
+  private async postJson<T>(path: string, body?: unknown): Promise<T> {
+    const res = await this.send(path, {
+      method: 'POST',
+      headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+    const data = await res.json().catch(() => ({})) as T & { error?: string }
+    if (!res.ok) throw new ServerError(res.status, data.error ?? `HTTP ${res.status}`)
+    return data
+  }
+
+  private async signIn(): Promise<Session> {
+    const keys = await this.deviceKeys()
+    const { challenge } = await this.postJson<{ challenge: string }>('/auth/challenge')
+    const message = new TextEncoder().encode(`mlhops-auth-v1:${challenge}`)
+    const signature = await this.subtle.sign(SIGN, keys.privateKey, message)
+    const jwk = await this.subtle.exportKey('jwk', keys.publicKey)
+    const res = await this.postJson<{ access_token: string; expires_in: number; user_id: string }>(
+      '/auth/token',
+      {
+        public_key: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y },
+        challenge,
+        signature: base64url(signature),
+      },
+    )
+    const margin = Math.min(60, res.expires_in / 2)
+    this.session = {
+      token: res.access_token,
+      userId: res.user_id,
+      refreshAt: this.now() + (res.expires_in - margin) * 1000,
+    }
+    return this.session
+  }
+
+  /** 동시에 여러 요청이 와도 로그인은 한 번만 한다. */
+  async token(): Promise<string> {
+    if (this.session && this.now() < this.session.refreshAt) return this.session.token
+    this.pending ??= this.signIn().finally(() => { this.pending = undefined })
+    return (await this.pending).token
+  }
+
+  /** `/op/{name}[/{version}]` 호출. 401 이면 한 번 다시 로그인해서 재시도한다. */
+  async op(name: string, init: {
+    method?: string; body?: BodyInit; version?: string; headers?: Record<string, string>; query?: Record<string, string>
+  } = {}): Promise<Response> {
+    const query = init.query ? `?${new URLSearchParams(init.query)}` : ''
+    return this.request(`/op/${name}${init.version ? `/${init.version}` : ''}${query}`, init)
+  }
+
+  /** 로그인한 사용자로 서버 경로를 부른다(`/auth/passkey/…` 등). 401 이면 한 번 다시 로그인한다. */
+  async request(path: string, init: { method?: string; body?: BodyInit; headers?: Record<string, string> } = {}): Promise<Response> {
+    const call = async () => {
+      const headers = new Headers(init.headers)
+      // Only the core may set trusted user headers. Never forward a caller-supplied copy.
+      for (const key of [...headers.keys()]) if (key.startsWith('x-mlhops-')) headers.delete(key)
+      headers.set('authorization', `Bearer ${await this.token()}`)
+      return this.send(path, { method: init.method ?? 'POST', body: init.body, headers })
+    }
+    let res = await call()
+    if (res.status === 401) {
+      this.session = undefined
+      res = await call()
+    }
+    return res
+  }
+
+  /** 로그인 없이 서버 경로에 JSON 을 보낸다(패스키 로그인). */
+  async postPublic<T>(path: string, body?: unknown): Promise<T> {
+    return this.postJson<T>(path, body)
+  }
+
+  /**
+   * 다른 곳(패스키)으로 로그인한 계정을 이 기기의 계정으로 삼는다. 새 기기 키를 만들어 그 계정에
+   * 연결한 뒤에야 저장해 두므로, 연결에 실패하면 이 기기의 원래 계정이 그대로 남는다.
+   */
+  async adoptAccount(login: { access_token: string; expires_in: number; user_id: string }): Promise<void> {
+    const keys = await this.subtle.generateKey(ECDSA, false, ['sign', 'verify']) as CryptoKeyPair
+    const { challenge } = await this.postJson<{ challenge: string }>('/auth/challenge')
+    // Linking is a different proof from signing in: the core rejects an auth-domain signature.
+    const signature = await this.subtle.sign(SIGN, keys.privateKey, new TextEncoder().encode(`mlhops-link-v1:${challenge}`))
+    const jwk = await this.subtle.exportKey('jwk', keys.publicKey)
+    const res = await this.send('/auth/link', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${login.access_token}` },
+      body: JSON.stringify({
+        public_key: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y },
+        challenge,
+        signature: base64url(signature),
+      }),
+    })
+    if (res.status !== 201 && res.status !== 200) {
+      const data = await res.json().catch(() => ({})) as { error?: string }
+      throw new ServerError(res.status, data.error ?? `HTTP ${res.status}`)
+    }
+    await this.opts.store.put(keys)
+    const margin = Math.min(60, login.expires_in / 2)
+    this.session = { token: login.access_token, userId: login.user_id, refreshAt: this.now() + (login.expires_in - margin) * 1000 }
+  }
+}
