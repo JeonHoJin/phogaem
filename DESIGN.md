@@ -13,7 +13,7 @@ The user journey is specified in [docs/user-flow.md](docs/user-flow.md). This fi
 ## Product goals
 Collect travel originals, merge byte-identical duplicates, select wanted photos and download them; enjoy photos together on a large screen. Success means participants can complete these jobs without reading instructions.
 
-No public launch, Cloudflare spending/R2 integration, deletion/retention implementation, automatic removal of visually similar photos or native TV app in this design change. Gemma similarity remains an experiment, not a production duplicate verdict. Shared-account approval and album membership remain mandatory.
+Private R2 storage and supervised thumbnail/Gemma processing are implemented. Manual comparison candidates use the existing analysis descriptors; they are not a production verdict that images are identical. No automatic merge/delete, best-shot verdict, deletion/retention UI or native TV app is introduced. Shared-account approval and album membership remain mandatory.
 
 ## Personas and jobs
 About four travel friends: a phone user contributing photos, a returning participant collecting friends' originals, and a group viewing on a connected TV. Participants navigate real shared libraries under their own accounts. Simulated member switching and browser-only samples are development/secondary surfaces, not the normal entry experience.
@@ -23,6 +23,7 @@ About four travel friends: a phone user contributing photos, a returning partici
 - An invitation opens its travel context and preserves that destination through sign-in and approval. Album access begins only after approval, membership checks and explicit participation.
 - Library list: trip cover/name, participant avatars, photo count and create action. New album names default to the browser-local date as `yymmdd 여행`; preserve edited drafts. New users see the create action without an introductory paragraph.
 - Album: trip name, participants, upload, filters and photo grid. Selection reveals a compact download tray. Viewing and selection are distinct interactions.
+- Comparison: an explicit `비교` action loads candidate groups for the current shared album. Groups intersect the active photo filters and need at least two visible members. A comparison modal presents at most four thumbnails at a time; originals load only on explicit expansion, with paging, shared selection, larger viewing and the existing download flow. No confidence percentages or explanatory copy.
 - Viewer: contain-fit photo, previous/next, slideshow, fullscreen and close. Controls can recede during viewing and remain keyboard/touch accessible.
 - Invitation/account actions are secondary controls. No shared-connection management step, storage-mode chooser or technical account explanation in the main journey.
 - Local library and synthetic samples remain explicitly separate secondary/development entry points; never present local uploads as shared. Moving existing local photos to a shared album requires a deliberate action.
@@ -43,6 +44,8 @@ Use consistent local SVG icons for upload, download, selection, receipt, retry, 
 
 ## Components
 Reuse BrandMark, native controls, filter chips, photo cards, photo grid, selection tray and fullscreen viewer. Evolve the shared manager into library-list, sign-in, invitation and account surfaces. Add item-level upload progress/retry states, a lock/pending access surface and a receipt toggle with distinct requested/confirmed appearances.
+
+Add candidate group cards and a comparison modal using existing Preview, Modal and selection controls. Candidate loading/error/empty states use icons, numeric counts and explicit refresh/retry. Stale requests cannot restore data after source/album changes or approval denial.
 
 Remove sentence-based empty-state headings, helper paragraphs, banners, success/error toasts, hover tooltips, dialog footnotes and preview explanations. Dialogs remain only where an actual choice/input is needed. Field labels and concise action names may remain; placeholder instructions do not. Shared tokens stay in styles.css; no parallel design system.
 

@@ -20,6 +20,7 @@
 - [썸네일 생성·캐시 검토](docs/thumbnail-cache.md)
 - [원본·WebP 썸네일 R2 전환 계획](docs/r2-migration-plan.md)
 - [실제 업로드 후처리와 프로세스 수명](docs/processing.md)
+- [분석 기반 비교 후보](docs/comparison.md)
 
 ## 개발 원칙
 

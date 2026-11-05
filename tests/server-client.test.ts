@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { ServerClient, ServerError, base64url, fromBase64url } from '../apps/web/src/server/client.ts';
 import type { KeyStore } from '../apps/web/src/server/client.ts';
 import { API_BASE, deviceKeyNamespace, server, validateApiBase } from '../apps/web/src/server/index.ts';
-import { getAlbum, getPhotoBlob, getThumbnailBlob, retryProcessing, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
+import { getSimilarPhotos, getAlbum, getPhotoBlob, getThumbnailBlob, retryProcessing, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
 import { creationOptions, requestOptions } from '../apps/web/src/server/passkey.ts';
 
 function memoryKeys() {
@@ -605,4 +605,41 @@ test('thumbnail reads use the protected thumbnail operation and retries retain a
     server.op = async () => Response.json({ error: 'approval required' }, { status: 403 });
     await assert.rejects(retryProcessing('album', 'photo', 'thumbnail'), ApprovalRequired);
   } finally { server.op = originalOp; }
+});
+
+
+test('comparison candidates use an approved metadata GET and retain approval errors', async () => {
+  const original = server.op;
+  try {
+    server.op = async (name, init) => {
+      assert.equal(name, 'phogaem-similar-get');
+      assert.equal(init?.version, 'v1'); assert.equal(init?.method, 'GET');
+      assert.deepEqual(init?.query, { albumId: 'album-one' }); assert.equal(init?.body, undefined);
+      return Response.json({ groups: [{ id: 'group-one', photoIds: ['photo-one', 'photo-two'] }], pending: 1, failed: 0, analyzed: 2 });
+    };
+    assert.equal((await getSimilarPhotos('album-one')).groups.length, 1);
+    server.op = async () => Response.json({ error: 'approval required' }, { status: 403 });
+    await assert.rejects(getSimilarPhotos('album-one'), error => error instanceof ApprovalRequired);
+  } finally { server.op = original; }
+});
+
+test('malformed, overlapping or unbounded comparison results are rejected', async () => {
+  const original = server.op;
+  const valid = { groups: [{ id: 'group-one', photoIds: ['photo-one', 'photo-two'] }], pending: 0, failed: 0, analyzed: 2 };
+  const invalid = [
+    null, {}, { ...valid, pending: -1 }, { ...valid, analyzed: 0.5 },
+    { ...valid, pending: 1999 },
+    { ...valid, groups: [{ id: 'group-one', photoIds: ['photo-one', 'photo-one'] }] },
+    { ...valid, groups: [{ id: 'group-one', photoIds: ['photo-one'] }] },
+    { ...valid, groups: [{ id: 'group-one', photoIds: Array.from({ length: 13 }, (_, i) => `photo-${i}`) }] },
+    { ...valid, groups: [...valid.groups, { id: 'group-two', photoIds: ['photo-two', 'photo-three'] }] },
+    { ...valid, groups: [...valid.groups, { id: 'group-one', photoIds: ['photo-three', 'photo-four'] }] },
+    { ...valid, groups: [{ id: '<img>', photoIds: ['photo-one', 'photo-two'] }] },
+  ];
+  try {
+    for (const value of invalid) {
+      server.op = async () => Response.json(value);
+      await assert.rejects(getSimilarPhotos('album'), error => error instanceof ServerError && error.status === 502);
+    }
+  } finally { server.op = original; }
 });

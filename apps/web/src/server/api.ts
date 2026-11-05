@@ -17,6 +17,9 @@ export interface RemotePhoto {
   processing?: PhotoProcessing;
 }
 export interface SharedAlbum { album: Album; members: SharedMember[]; photos: RemotePhoto[] }
+export interface SimilarGroup { id: string; photoIds: string[] }
+export interface SimilarPhotos { groups: SimilarGroup[]; pending: number; failed: number; analyzed: number }
+
 
 export const SHARED_MAX_FILE_SIZE = 16 * 1024 * 1024;
 
@@ -69,6 +72,36 @@ export async function createAlbum(title: string): Promise<Album> {
 export function getAlbum(albumId: string): Promise<SharedAlbum> {
   return json('album-get', undefined, { albumId });
 }
+
+export async function getSimilarPhotos(albumId: string): Promise<SimilarPhotos> {
+  const value: unknown = await json('similar-get', undefined, { albumId });
+  const invalid = () => { throw new ServerError(502, '비교 후보 응답을 확인하지 못했어요.'); };
+  if (!value || typeof value !== 'object') return invalid();
+  const data = value as Record<string, unknown>;
+  if (!Array.isArray(data.groups) || data.groups.length > 1000) return invalid();
+  for (const key of ['pending', 'failed', 'analyzed']) {
+    if (!Number.isSafeInteger(data[key]) || (data[key] as number) < 0 || (data[key] as number) > 2000) return invalid();
+  }
+  if ((data.pending as number) + (data.failed as number) + (data.analyzed as number) > 2000) return invalid();
+  const seenIds = new Set<string>();
+  const seenPhotos = new Set<string>();
+  const identifier = (x: unknown): x is string => typeof x === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(x);
+  const groups: SimilarGroup[] = [];
+  for (const entry of data.groups) {
+    if (!entry || typeof entry !== 'object') return invalid();
+    const group = entry as Record<string, unknown>;
+    if (!identifier(group.id) || seenIds.has(group.id) || !Array.isArray(group.photoIds) || group.photoIds.length < 2 || group.photoIds.length > 12) return invalid();
+    seenIds.add(group.id);
+    const photoIds: string[] = [];
+    for (const id of group.photoIds) {
+      if (!identifier(id) || seenPhotos.has(id)) return invalid();
+      seenPhotos.add(id); if (seenPhotos.size > 2000) return invalid(); photoIds.push(id);
+    }
+    groups.push({ id: group.id, photoIds });
+  }
+  return { groups, pending: data.pending as number, failed: data.failed as number, analyzed: data.analyzed as number };
+}
+
 
 export function createInvite(albumId: string): Promise<{ token: string; expiresAt: number }> {
   return json('invite-create', { albumId });
