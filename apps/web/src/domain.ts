@@ -30,17 +30,17 @@ export const MEMBERS: { id: MemberId; name: string; color: string }[] = [
   { id: 'sora', name: '소라', color: '#e5d6b6' },
 ];
 
-export function filterPhotos(photos: Photo[], filter: PhotoFilter, member: MemberId): Photo[] {
-  return photos.filter((photo) => matchesFilters(photo, [filter], member));
+export function filterPhotos(photos: Photo[], filter: PhotoFilter, member: MemberId, similarIds?: ReadonlySet<string>): Photo[] {
+  return photos.filter((photo) => matchesFilters(photo, [filter], member, similarIds));
 }
 
-export function matchesFilters(photo: Photo, filters: PhotoFilter[], member: MemberId): boolean {
+export function matchesFilters(photo: Photo, filters: PhotoFilter[], member: MemberId, similarIds?: ReadonlySet<string>): boolean {
   return filters.every((filter) => {
     switch (filter) {
       case 'all': return true;
       case 'others': return !photo.contributors.includes(member);
       case 'mine': return photo.contributors.includes(member);
-      case 'duplicates': return (photo.importCount ?? photo.contributors.length) > 1;
+      case 'duplicates': return (photo.importCount ?? photo.contributors.length) > 1 || similarIds?.has(photo.id) === true;
       case 'unreceived': return !photo.receivedBy.includes(member);
       default: return false;
     }

@@ -73,3 +73,16 @@ test('out-of-order duplicate upload responses cannot reduce contributions or cre
   assert.deepEqual(result[0]!.contributors, ['me', 'mina', 'jun']);
   assert.equal(previous.contributors.length, 2);
 });
+
+
+test('duplicates includes comparison candidates while retaining exact imports and other constraints', () => {
+  const similar = photo({ id: 'similar', contributors: ['me'] });
+  const exact = photo({ id: 'exact', importCount: 2 });
+  const unrelated = photo({ id: 'unrelated' });
+  const ids = new Set(['similar']);
+  assert.deepEqual(filterPhotos([similar, exact, unrelated], 'duplicates', 'me', ids), [similar, exact]);
+  assert.equal(matchesFilters(similar, ['duplicates', 'mine'], 'me', ids), true);
+  assert.equal(matchesFilters(similar, ['duplicates', 'others'], 'me', ids), false);
+  assert.equal(matchesFilters(similar, ['duplicates'], 'me'), false);
+  assert.equal(similar.importCount, 1);
+});

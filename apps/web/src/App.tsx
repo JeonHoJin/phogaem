@@ -242,18 +242,26 @@ export default function App() {
   const [comparisonGroupId, setComparisonGroupId] = useState<string | null>(null);
   const [comparisonPage, setComparisonPage] = useState(0);
   const comparisonRequest = useRef(0);
+  const candidatesRevision = useRef<string | null>(null);
   const returnComparisonId = useRef<string | null>(null);
   const clearComparison = useCallback(() => {
-    comparisonRequest.current += 1;
+    comparisonRequest.current += 1; candidatesRevision.current = null;
     setComparisonMode(false); setCandidates(null); setCandidatesLoading(false); setCandidatesError('');
     setComparisonGroupId(null); setComparisonPage(0); returnComparisonId.current = null;
   }, []);
   const fileInput = useRef<HTMLInputElement>(null);
   const activeMember = members.find(m => m.id === member) ?? { id: member, name: '나', color: '#c5d6c4' };
-  const visible = useMemo(() => photos.filter(p => matchesFilters(p, filters, member)), [photos, filters, member]);
+  const similarIds = useMemo(() => {
+    const known = new Set(photos.filter(photo => photo.albumId === remote?.album?.id).map(photo => photo.id));
+    return new Set((candidates?.groups ?? []).flatMap(group => {
+      const ids = group.photoIds.filter(id => known.has(id));
+      return ids.length >= 2 ? ids : [];
+    }));
+  }, [photos, candidates, remote?.album?.id]);
+  const visible = useMemo(() => photos.filter(p => matchesFilters(p, filters, member, similarIds)), [photos, filters, member, similarIds]);
   const selectedPhotos = visible.filter(p => selected.has(p.id));
   const totalSize = photos.reduce((sum, p) => sum + p.size, 0);
-  const duplicateCount = filterPhotos(photos, 'duplicates', member).length;
+  const duplicateCount = filterPhotos(photos, 'duplicates', member, similarIds).length;
   const queuedValid = queuedFiles.length > 0 && queuedFiles.every(file => {
     try { if (rejectedFiles.has(file)) return false; if (remote) sharedApi.validateSharedFiles([file]); else validateLocalFile(file); return true; }
     catch { return false; }
@@ -316,12 +324,15 @@ export default function App() {
     clearComparison();
     return () => { comparisonRequest.current += 1; };
   }, [activeAlbumId, clearComparison]);
-  async function loadCandidates() {
+  const visionRevision = photos.map(photo => `${photo.id}:${photo.processing?.vision.state ?? ''}`).sort().join('|');
+  const loadCandidates = useCallback(async (showComparison = true) => {
     if (!activeAlbumId || operation.current) return;
     const request = ++comparisonRequest.current;
     const epoch = sourceEpoch.current;
     const revision = mutationEpoch.current;
-    setComparisonMode(true); setCandidatesLoading(true); setCandidatesError(''); setCandidates(null); setComparisonGroupId(null);
+    candidatesRevision.current = visionRevision;
+    if (showComparison) { setComparisonMode(true); setCandidates(null); setComparisonGroupId(null); }
+    setCandidatesLoading(true); setCandidatesError('');
     try {
       const result = await sharedApi.getSimilarPhotos(activeAlbumId);
       if (request !== comparisonRequest.current || epoch !== sourceEpoch.current || revision !== mutationEpoch.current || albumIdentity.current !== activeAlbumId || operation.current) return;
@@ -333,7 +344,12 @@ export default function App() {
     } finally {
       if (request === comparisonRequest.current) setCandidatesLoading(false);
     }
-  }
+  }, [activeAlbumId, visionRevision, approvalDenied]);
+  const wantsCandidates = filters.includes('duplicates') || comparisonMode;
+  useEffect(() => {
+    if (!activeAlbumId || busy || !wantsCandidates || candidatesLoading || candidatesRevision.current === visionRevision) return;
+    void loadCandidates(false);
+  }, [activeAlbumId, busy, wantsCandidates, candidatesLoading, visionRevision, loadCandidates]);
   const hasProcessing = photos.some(photo => photo.processing && Object.values(photo.processing).some(job => job.state === 'pending' || job.state === 'running'));
   useEffect(() => {
     if (!activeAlbumId || !hasProcessing) return;
@@ -589,6 +605,7 @@ export default function App() {
         <section className="library" aria-label="사진 보관함"><div className="library-top"><span>{photos.length}</span><button className="text-button" disabled={!pendingPhotos.length || busy} onClick={() => setDownloadIds(pendingPhotos.map(p => p.id))}><Icon name="download" size={16} />다운로드 기록 {pendingPhotos.length > 0 && <span>{pendingPhotos.length}</span>}</button></div>
           <div className="filter-row"><div className="filter-chips" aria-label="사진 필터">{FILTERS.map(filter => <button key={filter.id} className={`filter-chip ${filters.includes(filter.id) ? 'active' : ''}`} aria-label={filter.label} aria-pressed={filters.includes(filter.id)} onClick={() => toggleFilter(filter.id)}>{({ all: '전체', others: '내 사진 제외', mine: '내 사진', unreceived: '받은 사진 제외', duplicates: '중복' })[filter.id]}{filter.id === 'duplicates' && duplicateCount > 0 && <span>{duplicateCount}</span>}</button>)}</div></div>
           <div className="selection-row"><label className="select-all"><input type="checkbox" aria-label="현재 사진 전체 선택" checked={visible.length > 0 && visible.every(p => selected.has(p.id))} disabled={!visible.length || busy} onChange={event => setSelected(event.target.checked ? new Set(visible.map(p => p.id)) : new Set())} />전체 선택</label><span>{visible.length}</span></div>
+          {!comparisonMode && remote?.album && filters.includes('duplicates') && (candidatesLoading ? <div role="status" aria-label="중복 후보 불러오는 중"><span className="loading-dot" /></div> : candidatesError ? <div className="failure-controls" role="group" aria-label="중복 후보 불러오기 실패"><Icon name="alert" /><span className="visually-hidden" role="alert">{candidatesError}</span><button className="icon-button" aria-label="재시도" disabled={busy} onClick={() => void loadCandidates(false)}><Icon name="retry" /></button></div> : null)}
           {comparisonMode && remote?.album ? <section className="similar-board" aria-label="비교 후보" aria-busy={candidatesLoading}>
             <header className="similar-board-header"><h2>비교</h2><div className="candidate-counts"><output aria-label="비교 후보 수">{candidates ? candidateGroups.length : '—'}</output>{candidates && <><span role="img" aria-label={`분석 완료 ${candidates.analyzed}`}><Icon name="check" size={16} />{candidates.analyzed}</span>{candidates.pending > 0 && <span role="img" aria-label={`분석 대기 ${candidates.pending}`}><Icon name="clock" size={16} />{candidates.pending}</span>}{candidates.failed > 0 && <span role="img" aria-label={`분석 실패 ${candidates.failed}`}><Icon name="alert" size={16} />{candidates.failed}</span>}</>}<button className="icon-button" aria-label="후보 새로고침" disabled={busy || candidatesLoading} onClick={() => void loadCandidates()}><Icon name="retry" /></button></div></header>
             {candidatesLoading ? <div className="empty-state" role="status" aria-label="비교 후보 불러오는 중"><span className="loading-dot" /></div> : candidatesError ? <div className="failure-controls" role="group" aria-label="비교 후보 불러오기 실패"><Icon name="alert" /><span className="visually-hidden" role="alert">{candidatesError}</span><button className="icon-button" aria-label="재시도" disabled={busy} onClick={() => void loadCandidates()}><Icon name="retry" /></button></div> : candidateGroups.length > 0 ? <div className="candidate-grid">{candidateGroups.map((group, index) => <button className="candidate-group" key={group.id} aria-label={`비교 후보 ${index + 1} 열기`} onClick={() => { setComparisonPage(0); setComparisonGroupId(group.id); }}><div className="candidate-previews">{group.photos.slice(0, 4).map(photo => <div key={photo.id}><Preview photo={photo} thumbnailOnly /></div>)}</div><span><Icon name="layers" size={16} /><output>{group.photos.length}</output></span></button>)}</div> : <div className="empty-state"><Icon name="layers" size={48} />{candidates && <output>0</output>}{candidates && candidates.groups.length > 0 && <button className="button secondary" onClick={() => setFilters(['all'])}>필터 초기화</button>}</div>}

@@ -96,3 +96,5 @@ Acceptance for the UI migration: traverse normal, empty, loading, failed, offlin
 - [ ] Implementation: validate batch delivery on physical mobile browsers; ZIP byte preservation and separate receipt states are covered by automated browser tests.
 - [ ] Implementation: validate whether icon/shape/action vocabulary makes pending access, deterministic rejection and unavailable previews understandable on mobile; improve the structure if testing exposes ambiguity.
 - [ ] Product: retention duration and future R2 authorization remain separate decisions, with no cloud cost introduced by this contract.
+
+The shared `중복` filter includes repeated identical-file imports and known members of similar-photo candidate groups. It fetches candidates without opening comparison, refreshes on analysis state changes, and retains AND semantics for the other active filters. Similarity never changes original bytes, exact deduplication, or receipt state.

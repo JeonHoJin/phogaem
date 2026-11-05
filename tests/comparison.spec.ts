@@ -141,12 +141,12 @@ test('candidate error recovery and filters keep comparison groups aligned with v
   await expect(page.locator('p:visible, [title]')).toHaveCount(0);
 });
 
-test('a delayed candidate result cannot restore shared content after opening the local library', async ({ page }) => {
+for (const trigger of ['비교', '중복']) test(`a delayed ${trigger} result cannot restore shared content after opening the local library`, async ({ page }) => {
   const model = await openShared(page);
   let release = () => {};
   model.gate = new Promise<void>(resolve => { release = resolve; });
   try {
-    await page.getByRole('button', { name: '비교', exact: true }).click();
+    await page.getByRole('button', { name: trigger, exact: true }).click();
     await expect.poll(() => model.similarCalls).toBe(1);
     await page.getByRole('button', { name: '보관함', exact: true }).click();
     await page.getByRole('button', { name: '계정', exact: true }).click();
@@ -210,4 +210,58 @@ test('a single trailing candidate keeps a previous photo beside it for compariso
   await expect(compare.getByRole('button', { name: 'photo-4.png 비교 선택', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await expect(compare.getByLabel('선택한 사진 수', { exact: true })).toHaveText('1');
   expect(model.originals).toEqual([]);
+});
+
+test('duplicates filter includes similar candidates and exact imports without opening comparison', async ({ page }) => {
+  const model = await openShared(page, 4);
+  model.groups = [{ id: 'c'.repeat(64), photoIds: model.photos.slice(0, 2).map(photo => photo.id) }];
+  model.photos[2]!.importCount = 2;
+  await page.getByRole('button', { name: '새로고침', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(4);
+  await page.getByRole('button', { name: '중복', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(3);
+  await expect(page.getByRole('region', { name: '비교 후보', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '중복', exact: true })).toContainText('3');
+  await page.getByRole('button', { name: '내 사진', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(1);
+  await page.getByRole('button', { name: '전체', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(4);
+  expect(model.similarCalls).toBe(1);
+  expect(model.originals).toEqual([]);
+  expect(model.mutations).toEqual([]);
+  await expect(page.locator('p:visible, [title]')).toHaveCount(0);
+});
+
+test('duplicate candidates retry failures and approval denial clears protected content', async ({ page }) => {
+  const model = await openShared(page);
+  model.similarStatus = 503;
+  await page.getByRole('button', { name: '중복', exact: true }).click();
+  const failure = page.getByRole('group', { name: '중복 후보 불러오기 실패', exact: true });
+  await expect(failure).toBeVisible();
+  expect(model.similarCalls).toBe(1);
+  model.similarStatus = 200;
+  await failure.getByRole('button', { name: '재시도', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(2);
+  model.similarStatus = 403;
+  await page.getByRole('button', { name: '새로고침', exact: true }).click();
+  await expect(page.getByRole('region', { name: '계정 승인 대기', exact: true })).toBeVisible();
+  await expect(page.locator('article.photo-card')).toHaveCount(0);
+  expect(model.mutations).toEqual([]);
+});
+
+test('duplicates refresh automatically when pending image analysis finishes', async ({ page }) => {
+  const model = await openShared(page);
+  for (const photo of model.photos) photo.processing = { ...ready, vision: { state: 'pending', attempts: 0 } };
+  model.groups = [];
+  await page.getByRole('button', { name: '새로고침', exact: true }).click();
+  await expect(page.getByRole('img', { name: 'photo-1.png 사진 분석 대기', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '중복', exact: true }).click();
+  await expect.poll(() => model.similarCalls).toBe(1);
+  await expect(page.locator('article.photo-card')).toHaveCount(0);
+  for (const photo of model.photos) photo.processing = ready;
+  model.groups = [{ id: 'c'.repeat(64), photoIds: model.photos.map(photo => photo.id) }];
+  await expect(page.locator('article.photo-card')).toHaveCount(2, { timeout: 8000 });
+  expect(model.similarCalls).toBe(2);
+  expect(model.originals).toEqual([]);
+  expect(model.mutations).toEqual([]);
 });
