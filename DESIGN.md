@@ -1,47 +1,95 @@
 # Design
 
 ## Source of truth
-Status: Active. Date: 2026-11-04. Surface: Phogaem local library and explicit mlhops shared-library integration. Evidence: README.md, docs/architecture.md, docs/plan.md and the user's shared-library, filtering and TV-viewing requirements. No existing screens, brand assets or screenshot references exist.
+Status: Active. Date: 2026-11-05. Surface: Phogaem shared travel library, photo collection/download and large-screen viewing.
+
+This file defines the experience implemented in the current working version; publishing follows the verified Pages workflow. Evidence reviewed: README.md, docs/plan.md, docs/approval.md, apps/web/src/App.tsx, existing styles and browser scenarios; the user's explicit requirement is zero explanatory or guidance copy, including exceptional states. Existing implementation includes local-first entry, explanatory paragraphs, notices and a shared-library manager; these are migration inputs, not target decisions. Existing synthetic screenshot baselines are implementation references, not an approved target mockup.
+
+The user journey is specified in [docs/user-flow.md](docs/user-flow.md). This file owns design rules; technical/security contracts remain in docs/architecture.md and docs/approval.md.
 
 ## Brand
-포갬 / Phogaem. Calm, personal, quietly playful. Layered photo mark and warm greens. Trust comes from honest local-storage and download-state labels. Avoid cloud-service jargon in the main flow, gradients, glossy dashboard cards and fabricated travel photographs.
+포갬 / Phogaem. Calm, personal, quietly playful. Preserve the layered photo mark and warm greens. Photos and direct interaction carry the experience. No visible slogans, promotional eyebrows, feature introductions, reassuring paragraphs or technical explanations. Avoid gradients, glossy dashboard cards and fabricated travel photographs.
 
 ## Product goals
-Collect travel originals, remove exact duplicates, select only wanted photos, view together on a large screen. Success: import → filter → select → download without losing originals. No public launch, R2 calls, deletion, visual-similarity matching or native TV app in this iteration. Server authentication is explicit and uses mlhops.
+Collect travel originals, merge byte-identical duplicates, select wanted photos and download them; enjoy photos together on a large screen. Success means participants can complete these jobs without reading instructions.
+
+No public launch, Cloudflare spending/R2 integration, deletion/retention implementation, automatic removal of visually similar photos or native TV app in this design change. Gemma similarity remains an experiment, not a production duplicate verdict. Shared-account approval and album membership remain mandatory.
 
 ## Personas and jobs
-Four friends after a trip; a phone user importing originals; a desktop user collecting friends' photos; a group watching on a connected TV. Local mode simulates members in one browser; shared mode uses verified server identities and actual membership.
+About four travel friends: a phone user contributing photos, a returning participant collecting friends' originals, and a group viewing on a connected TV. Participants navigate real shared libraries under their own accounts. Simulated member switching and browser-only samples are development/secondary surfaces, not the normal entry experience.
 
 ## Information architecture
-One album screen at /phogaem/: brand and local status, album heading, member switcher, import action, combined filters, selection controls, photo grid, persistent download tray. Modal image viewer and download receipt review. Shared-library manager provides explicit device/passkey connection, album creation/selection, invitation and refresh. Local mode remains the default.
+- `/phogaem/` enters sign-in or the participant's library list. Existing identity may resume its session; first visit alone must not create an identity or open a passkey prompt.
+- An invitation opens its travel context and preserves that destination through sign-in and approval. Album access begins only after approval, membership checks and explicit participation.
+- Library list: trip cover/name, participant avatars, photo count and create action. New users see the create action without an introductory paragraph.
+- Album: trip name, participants, upload, filters and photo grid. Selection reveals a compact download tray. Viewing and selection are distinct interactions.
+- Viewer: contain-fit photo, previous/next, slideshow, fullscreen and close. Controls can recede during viewing and remain keyboard/touch accessible.
+- Invitation/account actions are secondary controls. No shared-connection management step, storage-mode chooser or technical account explanation in the main journey.
+- Local library and synthetic samples remain explicitly separate secondary/development entry points; never present local uploads as shared. Moving existing local photos to a shared album requires a deliberate action.
 
 ## Design principles
-Images first. Separate viewing from selection. Preserve original bytes. Make filter combinations and empty results understandable. Show duplicates as one original with multiple contribution records. Record requested download separately from user-confirmed receipt.
+1. Zero visible explanatory/guidance copy, with no exception for errors, approval, offline states, unsupported previews or empty screens. If the flow requires an explanation, change the interaction.
+2. Allow essential identity/action data: trip and participant names, filenames, concise button/filter/field names, dates, counts, bytes and numeric progress. Do not disguise explanations as headings, button labels, tooltips, placeholders or short status badges.
+3. Express state through placement, stable visual state, progress, icon/shape and available actions. Never depend on color or animation alone. Visible labels name actions or entities, not sentences about what is happening.
+4. Images first. Clicking a photo opens it; a separate selection control/mode selects it. Multi-select exposes the next action beside its count.
+5. Preserve originals. Merge byte-identical originals while retaining contributors. Similar photos must not be silently merged or deleted.
+6. A download request is not a confirmed receipt. Keep distinct visual states and a deliberate receipt toggle/reset; never infer file-system completion from a browser download event.
+7. Recovery must be actionable at the affected item or region. Do not replace guidance paragraphs with unexplained dead ends, disabled controls or endless spinners.
 
 ## Visual language
-Tokens in apps/web/src/styles.css. Warm off-white canvas, white surfaces, ink #263128, olive #485e35, pale sage accents. System sans-serif stack for Korean, large compact heading and small uppercase English eyebrow. 4/8px spacing scale, 12–20px panel radii, restrained borders, minimal shadows. Icons are local inline SVG. Demo landscapes are generated local illustrations labelled as samples. No remote fonts, images or analytics.
+Reuse tokens in apps/web/src/styles.css: warm off-white canvas, white surfaces, ink #263128, olive #485e35 and pale sage accents; system Korean sans-serif, 4/8px spacing, 12–20px radii, restrained borders and minimal shadows. Remove decorative English eyebrows and marketing headings from product screens.
+
+Use consistent local SVG icons for upload, download, selection, receipt, retry, lock, connectivity, copy, fullscreen and playback. Each state must have a shape/icon and stable layout representation; motion supplements it. Numeric upload progress may use `12/48` and a progress track. Photos and explicit synthetic sample thumbnails supply imagery. No remote fonts, images or analytics.
 
 ## Components
-BrandMark, icon button, member selector, filter chip (multi-select), photo card (view and select independently), import/drop area, empty state, notice, download tray, receipt panel, full-screen viewer. Shared styling tokens live only in styles.css. Use native buttons, inputs and selects.
+Reuse BrandMark, native controls, filter chips, photo cards, photo grid, selection tray and fullscreen viewer. Evolve the shared manager into library-list, sign-in, invitation and account surfaces. Add item-level upload progress/retry states, a lock/pending access surface and a receipt toggle with distinct requested/confirmed appearances.
+
+Remove sentence-based empty-state headings, helper paragraphs, banners, success/error toasts, hover tooltips, dialog footnotes and preview explanations. Dialogs remain only where an actual choice/input is needed. Field labels and concise action names may remain; placeholder instructions do not. Shared tokens stay in styles.css; no parallel design system.
 
 ## Accessibility
-Target WCAG 2.2 AA. Visible focus, labelled controls, text with badges, aria-pressed filter state, aria-live notices. Modal traps focus and restores it on close; Escape, left/right navigation, pauseable slideshow, reduced-motion support. Touch targets at least 44px. Images have file-name alternatives; failed decoding has an explicit fallback.
+Target WCAG 2.2 AA. Keep nonvisual accessible names, state descriptions, error associations and live announcements for assistive technology; the zero-copy requirement concerns visible guidance. Do not remove semantics to hide text.
+
+Use native controls, visible focus, aria-pressed/selected states and meaningful image alternatives. Icon-only controls have accessible names but no explanatory browser `title` tooltip. Modals restore focus; Escape closes; arrows navigate photos; slideshow is pauseable and respects reduced motion. Touch targets are at least 44px. State is distinguishable without color, motion or hover. Treat any unresolved nonvisual recovery state as a design defect, not permission to add visible guidance.
 
 ## Responsive behavior
-390px mobile: stacked heading/actions, horizontally scrollable filters, two-column photo grid, safe-area-aware bottom tray. Tablet three columns; desktop four columns with max-width 1440px. Large viewer uses contain-fit originals on dark canvas. No hover-only essential actions.
+390px mobile prioritizes photo picking/upload, a two-column grid, compact filter controls and a safe-area-aware selection tray. Tablet uses three columns; desktop uses four with a 1440px content maximum. Desktop supports drag/drop and keyboard selection/viewing. TV via a connected browser emphasizes a dark contain-fit viewer and minimal playback controls. No essential action depends on hover. Longer filenames/trip names must not cause overflow.
 
 ## Interaction states
-Shared APIs require core account approval. Pending users see their account code, existing-passkey sign-in, first-passkey registration and approval retry. Revocation clears shared photos, viewer and selection on the next denied request. Local-only library remains independent.
+All rows obey zero visible guidance copy. Concise control names and concrete values are allowed.
 
-Initial empty album offers own-file upload and explicit sample loading. Busy imports show status and block concurrent mutations; existing photos remain visible. Offline local operation is supported while loaded. Storage quota and invalid files show actionable errors. No-match filters offer reset. Failed album switches preserve the prior album and photos; successful metadata loads switch the source together. Failed previews preserve download access. Downloads require a deliberate user action; receipts are confirmed or reset explicitly.
+| Situation | Visible response and recovery |
+| --- | --- |
+| Loading | Region skeleton/progress; retain stable layout and already-loaded photos. |
+| Empty library list / album | Create / upload control in the content region; no empty-state sentence. |
+| No filter matches | Keep active filters visible with a reset action in the empty grid. |
+| Upload in progress | Per-file thumbnail/progress and aggregate numeric count; prevent conflicting actions. |
+| Upload rejected / interrupted | Mark the affected item with a distinct failure icon and retry/remove/reselect actions; retain successful items and pending selection. File selection constrains supported formats. |
+| File/storage capacity limit | Preserve queued items, identify affected items, expose remove/reselect and capacity values where known. Do not offer an unchanged retry for a deterministic rejection. |
+| Slow/offline | Static connectivity state plus retry on affected region; preserve entered data. Do not silently start new uploads on reconnection. |
+| Approval pending | Lock/pending appearance, account code, recheck and account-switch actions. Keep invited trip context; no explanation or automatic admission. |
+| Approval revoked | Clear protected photo/viewer/selection state on denial; return to the locked surface. |
+| Invalid/expired invitation | Unavailable invitation state with exit and replace-link controls; do not join automatically or bypass approval. |
+| Failed album transition | Keep prior album and photos together; retry at the target selection. |
+| Preview unavailable | Photo/file placeholder with download action; retry only for a retriable fetch failure. |
+| Download | Original download action, separate requested/receipt icons and explicit receipt toggle/reset. Cancellation or failure never sets confirmed receipt. |
+| Operation completed | Updated grid, progress or icon state is the feedback; no toast or success sentence. |
+
+Authentication may invoke browser/OS-owned passkey or file/download dialogs. Their text is outside the app's rendering control. Do not add application-owned explanatory copy around them; do not claim platform dialogs contain no text.
 
 ## Content voice
-Friendly concise Korean. 보관함, 내 사진, 받은 사진, 원본, 중복. ‘다운로드 요청됨’ is not ‘저장 완료’. Always show that prototype data stays in this browser. Samples are labelled. Local mode describes device-only storage; shared mode describes server storage and actual invitations.
+Visible product language consists of identifiers, compact action/filter/field names and concrete values. Examples: `올리기`, `선택`, `다운로드`, `재시도`, `참여`, `내 사진 제외`, `받은 사진 제외`, `12/48`, `64 MB`. This is not an exception allowing short explanatory statuses such as “승인을 기다려 주세요”.
+
+No onboarding prose, help copy, slogans, status sentences, toast messages, error reasons or technical details appear in the product UI, even when an operation cannot continue. Help/tooltips must not become a hidden alternative guidance flow. Technical documentation and nonvisual accessibility descriptions can explain behavior. Name the actual state honestly: no UI may represent a requested download as saved, or a local-only photo as shared.
 
 ## Implementation constraints
-React + TypeScript + Vite static build at /phogaem/. Native IndexedDB and Web Crypto; optional explicit mlhops connection, no R2 storage calls or storage credentials. Shared preview originals are lazy, paced and released off-screen. JPEG/PNG/WebP and original HEIC with fallback. Max 50MiB per local import and 16MiB per shared import. Verify domain logic with node:test; interactions and 390px/1920px layouts with Playwright on local Chrome. Keep screenshots in ignored test-results/.
+React + TypeScript + Vite at `/phogaem/`; native IndexedDB/Web Crypto and approved mlhops operations. No new dependencies or actual R2 requests are required by this design. Keep CSP, transport/session protections and approval/membership checks. Never weaken authentication to shorten a journey.
+
+Shared originals are lazy, paced and released offscreen. Shared limit remains 16MiB/photo; secondary local mode 50MiB. Preserve HEIC originals even when preview fails. Selected originals download with one action: a single original stays a direct file, multiple originals use a dependency-free stored ZIP32 with UTF-8 safe filenames and CRC32. Archives are capped at 256MiB of originals; the download dialog shows size/capacity and lets users remove entries. Receipt confirmation remains separate.
+
+Acceptance for the UI migration: traverse normal, empty, loading, failed, offline, pending/revoked approval, expired invitation, unsupported preview and partial-upload/download flows without app-owned guidance copy; verify useful recovery and no false success. Check semantic accessibility and 390px/1920px layouts. Existing tests asserting explanatory text must migrate to state/action/result assertions while retaining security and byte-preservation coverage. No automatic approval, production test identities or real user-photo fixtures.
 
 ## Open questions
-- [ ] User: confirm long-term display names for real members; current shared members use ‘나’ and numbered ‘여행 친구’.
-- [ ] Implementation: multi-file archive/streaming strategy and HEIC previews need separate validation; initial download queue handles one original per explicit action.
-- [ ] User: retention period and direct-R2-transfer exception remain decisions for later integration.
+- [ ] Product/implementation: choose participant display-name capture/management; names must identify actual contributors without instructional onboarding.
+- [ ] Implementation: validate batch delivery on physical mobile browsers; ZIP byte preservation and separate receipt states are covered by automated browser tests.
+- [ ] Implementation: validate whether icon/shape/action vocabulary makes pending access, deterministic rejection and unavailable previews understandable on mobile; improve the structure if testing exposes ambiguity.
+- [ ] Product: retention duration and future R2 authorization remain separate decisions, with no cloud cost introduced by this contract.

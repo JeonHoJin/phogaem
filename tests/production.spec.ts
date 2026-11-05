@@ -14,7 +14,9 @@ test('built app loads without identity requests and preserves original upload/vi
     } else await route.continue();
   });
   await page.goto('./');
-  await expect(page.getByRole('heading', { name: '우리의 첫 사진을 포개볼까요?' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '보관함', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '기기 보관함', exact: true }).click();
+  await expect(page.getByRole('main')).toHaveAttribute('aria-busy', 'false');
   // An injection-shaped filename must stay text in the production React bundle.
   const name = '<img src=x onerror=alert(1)>.png';
   await page.getByLabel('사진 파일 선택').setInputFiles({ name, mimeType: 'image/png', buffer: pixel });
@@ -33,7 +35,7 @@ test('built app loads without identity requests and preserves original upload/vi
 
 test('built policy blocks injected scripts, external connections and base URL changes', async ({ page }) => {
   await page.goto('./');
-  await expect(page.getByRole('heading', { name: '우리의 첫 사진을 포개볼까요?' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '보관함', exact: true })).toBeVisible();
   const result = await page.evaluate(async () => {
     const violations: string[] = [];
     document.addEventListener('securitypolicyviolation', event => violations.push(event.effectiveDirective));

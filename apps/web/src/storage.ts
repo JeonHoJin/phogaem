@@ -43,7 +43,7 @@ export async function loadPhotos(): Promise<Photo[]> {
   });
 }
 
-function validateFile(file: File): void {
+export function validateFile(file: File): void {
   if (file.size > MAX_FILE_SIZE) throw new Error(`${file.name}: 파일당 최대 50MB까지 올릴 수 있습니다.`);
   if (file.size === 0) throw new Error(`${file.name}: 비어 있는 파일입니다.`);
   if (/svg/i.test(file.type) || /\.svgz?$/i.test(file.name)) throw new Error(`${file.name}: SVG 파일은 업로드할 수 없습니다.`);

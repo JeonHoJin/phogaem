@@ -94,7 +94,7 @@ export function validateSharedFiles(files: File[]): void {
   }
 }
 
-export async function uploadSharedPhotos(albumId: string, files: File[]): Promise<{ added: number; duplicates: number }> {
+export async function uploadSharedPhotos(albumId: string, files: File[], onProgress?: (completed: number) => void): Promise<{ added: number; duplicates: number }> {
   // Validate the entire batch before making requests. Uploads themselves commit per original.
   validateSharedFiles(files);
   let added = 0;
@@ -108,6 +108,7 @@ export async function uploadSharedPhotos(albumId: string, files: File[]): Promis
       const result = await (await checked(response)).json() as { added: boolean };
       if (result.added) added += 1;
       else duplicates += 1;
+      onProgress?.(added + duplicates);
     } catch (error) {
       if (added + duplicates) {
         const message = error instanceof Error ? error.message : '업로드를 완료하지 못했어요.';
