@@ -265,3 +265,45 @@ test('duplicates refresh automatically when pending image analysis finishes', as
   expect(model.originals).toEqual([]);
   expect(model.mutations).toEqual([]);
 });
+
+test('an invitation in an open approved app joins directly and resets unrelated photo filters', async ({ page }) => {
+  const model = await openShared(page);
+  await page.getByRole('button', { name: '내 사진', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(1);
+  let joins = 0;
+  await page.route('**/op/phogaem-invite-join/v1', async route => {
+    joins += 1;
+    expect(route.request().postDataJSON()).toEqual({ token: 'i'.repeat(43) });
+    await route.fulfill({ json: { album: { id: albumId, title: '비교 검증 여행', createdAt: 1 } } });
+  });
+  await page.goto(`./#invite=${'i'.repeat(43)}`);
+  await expect(page.getByRole('dialog', { name: '공유보관함 관리' })).toHaveCount(0);
+  await expect(page.locator('article.photo-card')).toHaveCount(2);
+  await expect(page.getByRole('button', { name: '전체', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  expect(joins).toBe(1); expect(new URL(page.url()).hash).toBe('');
+  expect(model.mutations).toEqual([]);
+});
+
+for (const status of [404, 403, 503]) test(`invitation failure ${status} preserves recovery and approval boundaries`, async ({ page }) => {
+  await openShared(page);
+  let calls = 0;
+  await page.route('**/op/phogaem-invite-join/v1', async route => {
+    calls += 1;
+    await route.fulfill({ status, json: { error: status === 403 ? 'approval required' : 'synthetic unavailable' } });
+  });
+  await page.goto(`./#invite=${'i'.repeat(43)}`);
+  if (status === 403) {
+    await expect(page.getByRole('region', { name: '계정 승인 대기', exact: true })).toBeVisible();
+    await expect(page.locator('article.photo-card')).toHaveCount(0);
+  } else {
+    await expect(page.getByRole('img', { name: status === 404 ? '사용할 수 없는 초대' : '초대 참여 실패', exact: true })).toBeVisible();
+    await expect(page.getByLabel('초대 링크', { exact: true })).toBeVisible();
+    await expect(page.getByLabel('보관함 이름', { exact: true })).toHaveCount(0);
+    await page.getByRole('dialog', { name: '공유보관함 관리' }).getByRole('button', { name: status === 404 ? '참여' : '재시도', exact: true }).click();
+    await expect.poll(() => calls).toBe(2);
+  }
+  await expect(page.locator('p:visible, [title]')).toHaveCount(0);
+  await page.getByRole('button', { name: '공유보관함 관리 닫기', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: '공유보관함 관리' })).toHaveCount(0);
+  expect(new URL(page.url()).hash).toBe('');
+});

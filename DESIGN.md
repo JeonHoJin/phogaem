@@ -19,6 +19,8 @@ Private R2 storage and supervised thumbnail/Gemma processing are implemented. Ma
 About four travel friends: a phone user contributing photos, a returning participant collecting friends' originals, and a group viewing on a connected TV. Participants navigate real shared libraries under their own accounts. Simulated member switching and browser-only samples are development/secondary surfaces, not the normal entry experience.
 
 ## Information architecture
+
+Invitation links use a dedicated join surface, never the create-library form. An existing approved account joins and opens the invited album directly; a new browser still requires explicit sign-in/start and account approval, then continues to the same album automatically. Pending access retains the link. Expired/replaced/full/unavailable invitations offer icon-based states and retry or replacement-link input. Opening an invitation in an already-running app is handled; closing it cancels automatic participation. Successful entry resets previous photo filters.
 - `/phogaem/` enters sign-in or the participant's library list. Existing identity may resume its session; first visit alone must not create an identity or open a passkey prompt.
 - An invitation opens its travel context and preserves that destination through sign-in and approval. Album access begins only after approval, membership checks and explicit participation.
 - Library list: trip cover/name, participant avatars, photo count and create action. New album names default to the browser-local date as `yymmdd 여행`; preserve edited drafts. New users see the create action without an introductory paragraph.

@@ -375,8 +375,7 @@ test('an invitation survives explicit login and pending approval before joining 
     const identity = await client<{ userId: string }>(guest, 'identity');
     await setApproval(guest, identity.userId);
     await guest.getByRole('button', { name: '새로고침', exact: true }).click();
-    await expect(guest.getByLabel('초대 코드', { exact: true })).toHaveValue(invite.token);
-    await guest.getByRole('dialog', { name: '공유보관함 관리' }).getByRole('button', { name: '참여', exact: true }).click();
+    await expect(guest.getByLabel('보관함 이름', { exact: true })).toHaveCount(0);
     await expect(guest.getByRole('heading', { name: '초대로 만난 여행', exact: true })).toBeVisible();
     await expect(guest.getByLabel('공유보관함 선택', { exact: true })).toHaveValue(album.id);
     await expect(guest.locator('p:visible, [title]')).toHaveCount(0);
@@ -567,4 +566,40 @@ test('parallel completions update photos and the remaining queue before the batc
     releaseOldDuplicate();
     releaseFinalMetadata();
   }
+});
+
+
+
+test('approved invitations open directly on reload and hash change, and replaced links recover', async ({ browser }) => {
+  const ownerContext = await browser.newContext(); const guestContext = await browser.newContext();
+  try {
+    const owner = await ownerContext.newPage(); await owner.goto('./'); await approveIdentity(owner);
+    const album = await client<{ id: string }>(owner, 'create', { title: '바로 참여 여행' });
+    const invitation = await client<{ token: string }>(owner, 'invite', { albumId: album.id });
+    const guest = await guestContext.newPage(); await guest.goto('./'); await approveIdentity(guest);
+    await guest.getByRole('button', { name: '시작', exact: true }).click();
+    await expect(guest.getByRole('region', { name: '여행 보관함 목록' })).toBeVisible();
+    for (const entry of ['reload', 'hashchange']) {
+      if (entry === 'reload') await guest.goto('about:blank');
+      let joins = 0;
+      const countJoin = (request: import('@playwright/test').Request) => { if (request.url().includes('/op/phogaem-invite-join/')) joins += 1; };
+      guest.on('request', countJoin);
+      await guest.goto(`./#invite=${encodeURIComponent(invitation.token)}`);
+      await expect(guest.getByRole('heading', { name: '바로 참여 여행', exact: true })).toBeVisible();
+      await expect(guest.getByRole('dialog', { name: '공유보관함 관리' })).toHaveCount(0);
+      expect(new URL(guest.url()).hash).toBe(''); expect(joins).toBe(1);
+      guest.off('request', countJoin);
+    }
+    const result = await client<{ members: unknown[] }>(guest, 'get', { albumId: album.id });
+    expect(result.members).toHaveLength(2);
+    const fresh = await client<{ token: string }>(owner, 'invite', { albumId: album.id });
+    await guest.goto(`./#invite=${encodeURIComponent(invitation.token)}`);
+    await expect(guest.getByRole('img', { name: '사용할 수 없는 초대', exact: true })).toBeVisible();
+    await expect(guest.getByLabel('보관함 이름', { exact: true })).toHaveCount(0);
+    await expect(guest.locator('p:visible, [title]')).toHaveCount(0);
+    await guest.getByLabel('초대 링크', { exact: true }).fill(`${new URL(guest.url()).origin}/phogaem/#invite=${fresh.token}`);
+    await guest.getByRole('dialog', { name: '공유보관함 관리' }).getByRole('button', { name: '참여', exact: true }).click();
+    await expect(guest.getByRole('dialog', { name: '공유보관함 관리' })).toHaveCount(0);
+    await expect(guest.getByRole('heading', { name: '바로 참여 여행', exact: true })).toBeVisible();
+  } finally { await Promise.all([ownerContext.close(), guestContext.close()]); }
 });

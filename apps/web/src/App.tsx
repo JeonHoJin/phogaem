@@ -216,6 +216,9 @@ export default function App() {
   const [managerOpen, setManagerOpen] = useState(() => new URLSearchParams(location.hash.slice(1)).has('invite'));
   const [albumTitle, setAlbumTitle] = useState(defaultAlbumName);
   const suggestedTitle = useRef(albumTitle);
+  const [incomingInvite, setIncomingInvite] = useState(() => new URLSearchParams(location.hash.slice(1)).has('invite'));
+  const autoJoinAttempted = useRef(false);
+  const [inviteFailure, setInviteFailure] = useState<'invalid' | 'full' | 'retry' | null>(null);
   const [inviteToken, setInviteToken] = useState(() => new URLSearchParams(location.hash.slice(1)).get('invite') ?? '');
   const [inviteLink, setInviteLink] = useState('');
   const [inviteExpires, setInviteExpires] = useState(0);
@@ -479,10 +482,10 @@ export default function App() {
       return refreshAlbum(photo.albumId!);
     });
   }
-  function clearTransient() {
+  const clearTransient = useCallback(() => {
     clearComparison();
     setSelected(new Set()); setViewerId(null); setDownloadIds(null); setInviteLink(''); setNotice(''); setCopied(false); setQueuedFiles([]); setProgress(null);
-  }
+  }, [clearComparison]);
   async function connectShared(passkey = false) {
     if (loading) return;
     await mutate(async () => {
@@ -491,6 +494,7 @@ export default function App() {
       setApprovalCode(null);
       setRemote({ ...result, album: null, members: [] });
       clearTransient();
+      autoJoinAttempted.current = false; setInviteFailure(null);
       setLocalMode(false); setManagerOpen(!!inviteToken);
       try { localStorage.setItem(RESUME_KEY, '1'); } catch { /* optional resume */ }
       return [];
@@ -517,19 +521,59 @@ export default function App() {
       return loaded;
     }, '새 공유보관함을 만들었어요. 초대 링크로 친구들을 불러보세요.');
   }
-  async function joinSharedAlbum() {
-    await mutate(async () => {
+  const joinSharedAlbum = useCallback(async () => {
+    if (operation.current || loading) return;
+    operation.current = true; mutationEpoch.current += 1; sourceEpoch.current += 1;
+    const epoch = sourceEpoch.current;
+    setBusy(true); setError(''); setInviteFailure(null); clearComparison();
+    try {
       let token = inviteToken.trim();
       if (token.includes('#')) token = new URLSearchParams(token.split('#')[1]).get('invite') ?? '';
-      if (!token) throw new Error('초대 코드를 입력해 주세요.');
+      if (!token) throw new ServerError(404, '초대 없음');
       const album = await sharedApi.joinInvite(token);
+      if (epoch !== sourceEpoch.current) return;
       const result = await sharedApi.listAlbums();
-      setRemote(previous => previous ? { ...previous, albums: result.albums } : previous);
-      const loaded = await refreshAlbum(album.id);
-      clearTransient(); setManagerOpen(false); setInviteToken('');
+      if (epoch !== sourceEpoch.current) return;
+      const loaded = await sharedApi.getAlbum(album.id);
+      if (epoch !== sourceEpoch.current) return;
+      setRemote({ ...result, album: loaded.album, members: loaded.members });
+      setPhotos(loaded.photos.map(photo => ({ ...photo, albumId: album.id })));
+      setLocalMode(false); setApprovalCode(null); clearTransient();
+      setManagerOpen(false); setIncomingInvite(false); setInviteToken(''); setFilters(['all']);
       history.replaceState(null, '', location.pathname + location.search);
-      return loaded;
-    }, '보관함에 참여했어요. 함께 사진을 모아보세요.');
+      try { localStorage.setItem(RESUME_KEY, '1'); } catch { /* optional resume */ }
+    } catch (reason) {
+      if (epoch !== sourceEpoch.current) return;
+      if (reason instanceof ApprovalRequired) approvalDenied(reason);
+      else {
+        setInviteFailure(reason instanceof ServerError && [404, 410].includes(reason.status) ? 'invalid' : reason instanceof ServerError && reason.status === 409 ? 'full' : 'retry');
+        setError(reason instanceof Error ? reason.message : '참여 실패'); setManagerOpen(true);
+      }
+    } finally { operation.current = false; setBusy(false); }
+  }, [inviteToken, loading, clearComparison, clearTransient, approvalDenied]);
+  useEffect(() => {
+    if (!incomingInvite || !remote?.userId || busy || loading || autoJoinAttempted.current) return;
+    autoJoinAttempted.current = true;
+    void joinSharedAlbum();
+  }, [incomingInvite, remote?.userId, busy, loading, joinSharedAlbum]);
+  useEffect(() => {
+    const acceptLink = () => {
+      const token = new URLSearchParams(location.hash.slice(1)).get('invite');
+      if (token === null) return;
+      sourceEpoch.current += 1; autoJoinAttempted.current = false;
+      setInviteToken(token); setIncomingInvite(true); setInviteFailure(null); setError('');
+      clearTransient(); setManagerOpen(true);
+    };
+    window.addEventListener('hashchange', acceptLink);
+    return () => window.removeEventListener('hashchange', acceptLink);
+  }, [clearTransient]);
+  function dismissManager() {
+    if (busy) return;
+    setManagerOpen(false);
+    if (incomingInvite) {
+      autoJoinAttempted.current = true; setIncomingInvite(false); setInviteToken(''); setInviteFailure(null); setError('');
+      history.replaceState(null, '', location.pathname + location.search);
+    }
   }
   async function invite() {
     if (!remote?.album) return;
@@ -545,6 +589,7 @@ export default function App() {
     await mutate(async () => {
       const local = await loadPhotos();
       setRemote(null); setApprovalCode(null); clearTransient(); setManagerOpen(false); setLocalMode(true);
+      setIncomingInvite(false); autoJoinAttempted.current = true;
       try { localStorage.removeItem(RESUME_KEY); } catch { /* optional resume */ }
       return local;
     }, undefined, true);
@@ -622,12 +667,19 @@ export default function App() {
       {errorControl()}<button className="button primary batch-download" disabled={busy || !downloadIds.length || (downloadIds.length > 1 && downloadSize > MAX_ARCHIVE_BYTES)} onClick={() => void downloadBatch()}><Icon name="download" />일괄 다운로드 <span>{downloadIds.length}</span></button><div className="download-capacity"><span>{formatBytes(downloadSize)}</span>{downloadIds.length > 1 && <span>/ {formatBytes(MAX_ARCHIVE_BYTES)}</span>}</div>
       {busy && progress && <div className="queue-progress"><progress value={progress.done} max={progress.total} aria-label="다운로드 진행" /><output>{progress.done}/{progress.total}</output></div>}
       <div className="download-list">{downloadIds.map(id => photos.find(photo => photo.id === id)).filter((photo): photo is Photo => !!photo).map(photo => <div key={photo.id} className="download-item"><div className="download-thumb"><Preview photo={photo} /></div><div className="download-item-info"><strong>{photo.name}</strong><small>{formatBytes(photo.size)}</small><span role="img" aria-label={photo.receivedBy.includes(member) ? '받았음 확인' : photo.requestedBy.includes(member) ? '다운로드 요청됨' : '아직 요청하지 않음'}><Icon name={photo.receivedBy.includes(member) ? 'check' : photo.requestedBy.includes(member) ? 'download' : 'image'} size={16} /></span></div><button className="icon-button" aria-label={`${photo.name} 다운로드 선택 해제`} disabled={busy} onClick={() => setDownloadIds(current => current?.filter(id => id !== photo.id) ?? null)}><Icon name="close" /></button><div className="receipt-actions">{photo.requestedBy.includes(member) && <><button className="icon-button" disabled={busy} aria-label="받았음 확인" aria-pressed={photo.receivedBy.includes(member)} onClick={() => void mutate(() => downloadState([photo.id], photo.receivedBy.includes(member) ? 'reset' : 'received'))}><Icon name="check" /></button><button className="icon-button" disabled={busy} aria-label="기록 되돌리기" onClick={() => void mutate(() => downloadState([photo.id], 'reset'))}><Icon name="retry" /></button></>}</div><button className="icon-button outlined" disabled={busy} aria-label={`${photo.name} 원본 다운로드`} onClick={() => void download(photo)}><Icon name="download" /></button></div>)}</div></Modal>}
-    {managerOpen && <Modal label="공유보관함 관리" onClose={() => { if (!busy) setManagerOpen(false); }} className="download-dialog shared-dialog"><header className="dialog-header"><h2>보관함</h2><button className="icon-button" disabled={busy} aria-label="공유보관함 관리 닫기" onClick={() => setManagerOpen(false)}><Icon name="close" /></button></header>
-      {errorControl()}{!remote ? <div className="connect-actions">{approvalCode !== null && <section className="approval-pending" aria-label="계정 승인 대기"><Icon name="lock" size={40} /><output aria-label="계정 코드">{approvalCode}</output><button className="icon-button" disabled={busy || loading} aria-label="새로고침" onClick={() => void connectShared()}><Icon name="retry" /></button></section>}
+    {managerOpen && <Modal label="공유보관함 관리" onClose={dismissManager} className="download-dialog shared-dialog"><header className="dialog-header"><h2>{incomingInvite ? '참여' : '보관함'}</h2><button className="icon-button" disabled={busy} aria-label="공유보관함 관리 닫기" onClick={dismissManager}><Icon name="close" /></button></header>
+      {!incomingInvite && errorControl()}{!remote ? <div className="connect-actions">{incomingInvite && errorControl()}{approvalCode !== null && <section className="approval-pending" aria-label="계정 승인 대기"><Icon name="lock" size={40} /><output aria-label="계정 코드">{approvalCode}</output><button className="icon-button" disabled={busy || loading} aria-label="새로고침" onClick={() => void connectShared()}><Icon name="retry" /></button></section>}
         <button className="button primary" disabled={busy || loading || !passkeySupported()} onClick={() => void connectShared(true)}>로그인</button><button className="button secondary" disabled={busy || loading} onClick={() => void connectShared()}>시작</button>
         {approvalCode !== null && <button className="button secondary" disabled={busy || !passkeySupported()} onClick={() => void mutate(async () => { await registerPasskey(); setPasskeyRegistered(true); return []; }, '패스키 등록 완료')}>{passkeyRegistered ? <Icon name="check" /> : <Icon name="lock" />}패스키 등록</button>}
         <button className="text-button" disabled={busy} onClick={() => void returnLocal()}>기기 보관함</button>
-      </div> : <>
+      </div> : incomingInvite ? <section aria-label="초대 참여" aria-busy={busy}>
+        {inviteFailure ? <form className="shared-form" onSubmit={event => { event.preventDefault(); void joinSharedAlbum(); }}>
+          <span role="img" aria-label={inviteFailure === 'invalid' ? '사용할 수 없는 초대' : inviteFailure === 'full' ? '보관함 인원 제한' : '초대 참여 실패'}><Icon name={inviteFailure === 'invalid' ? 'close' : inviteFailure === 'full' ? 'user' : 'alert'} size={40} /></span>
+          <span className="visually-hidden" role="alert">{error}</span>
+          <label htmlFor="incoming-token">초대 링크</label><input id="incoming-token" aria-label="초대 링크" value={inviteToken} maxLength={2048} required disabled={busy} onChange={event => setInviteToken(event.target.value)} />
+          <button className="button primary" disabled={busy || !inviteToken.trim()}>{inviteFailure === 'invalid' ? '참여' : '재시도'}</button>
+        </form> : <div className="empty-state" role="status" aria-label="보관함 참여 중"><span className="loading-dot" /></div>}
+      </section> : <>
         <form className="shared-form" onSubmit={event => { event.preventDefault(); void createSharedAlbum(); }}><label htmlFor="album-name">보관함 이름</label><div><input id="album-name" aria-label="보관함 이름" value={albumTitle} maxLength={80} required onChange={event => setAlbumTitle(event.target.value)} disabled={busy} /><button className="button primary" disabled={busy || !albumTitle.trim()}>만들기</button></div></form>
         <form className="shared-form" onSubmit={event => { event.preventDefault(); void joinSharedAlbum(); }}><label htmlFor="invite-token">초대 코드</label><input id="invite-token" aria-label="초대 코드" value={inviteToken} onChange={event => setInviteToken(event.target.value)} maxLength={2048} required disabled={busy} aria-invalid={!!error && !!inviteToken} /><button className="button secondary" disabled={busy || !inviteToken.trim()}>참여</button></form>
         {inviteLink && <div className="shared-form"><label htmlFor="share-link">초대 링크</label><input id="share-link" aria-label="초대 링크" value={inviteLink} readOnly onFocus={event => event.target.select()} /><time>{new Date(inviteExpires).toLocaleString('ko-KR')}</time><button className="button secondary" aria-label="초대 링크 복사" onClick={async () => { try { await navigator.clipboard.writeText(inviteLink); setCopied(true); } catch { setCopied(false); document.getElementById('share-link')?.focus(); } }}><Icon name={copied ? 'check' : 'copy'} />복사</button></div>}
