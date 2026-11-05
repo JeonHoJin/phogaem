@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { ServerClient, ServerError, base64url, fromBase64url } from '../apps/web/src/server/client.ts';
 import type { KeyStore } from '../apps/web/src/server/client.ts';
 import { API_BASE, deviceKeyNamespace, server, validateApiBase } from '../apps/web/src/server/index.ts';
-import { getSimilarPhotos, getAlbum, getPhotoBlob, getThumbnailBlob, retryProcessing, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
+import { getSimilarPhotos, setRepresentative, setMemberNickname, getAlbum, getPhotoBlob, getThumbnailBlob, retryProcessing, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
 import { creationOptions, requestOptions } from '../apps/web/src/server/passkey.ts';
 
 function memoryKeys() {
@@ -629,6 +629,9 @@ test('malformed, overlapping or unbounded comparison results are rejected', asyn
   const invalid = [
     null, {}, { ...valid, pending: -1 }, { ...valid, analyzed: 0.5 },
     { ...valid, pending: 1999 },
+    { ...valid, groups: [{ ...valid.groups[0], representativeId: 'outside-photo' }] },
+    { ...valid, groups: [{ ...valid.groups[0], representativeId: null }] },
+    { ...valid, groups: [{ ...valid.groups[0], representativeId: '<img>' }] },
     { ...valid, groups: [{ id: 'group-one', photoIds: ['photo-one', 'photo-one'] }] },
     { ...valid, groups: [{ id: 'group-one', photoIds: ['photo-one'] }] },
     { ...valid, groups: [{ id: 'group-one', photoIds: Array.from({ length: 13 }, (_, i) => `photo-${i}`) }] },
@@ -641,5 +644,36 @@ test('malformed, overlapping or unbounded comparison results are rejected', asyn
       server.op = async () => Response.json(value);
       await assert.rejects(getSimilarPhotos('album'), error => error instanceof ServerError && error.status === 502);
     }
+  } finally { server.op = original; }
+});
+
+
+test('representative selection and nickname writes retain approved transport and typed denial', async () => {
+  const original = server.op;
+  const writes: Array<{ name: string; body: unknown }> = [];
+  try {
+    server.op = async (name, init) => {
+      assert.equal(init?.version, 'v1'); assert.equal(init?.method, 'POST');
+      writes.push({ name, body: JSON.parse(init?.body as string) });
+      return Response.json({ ok: true });
+    };
+    await setRepresentative('album-one', 'group-one', 'photo-two');
+    await setMemberNickname('album-one', '여행 친구');
+    assert.deepEqual(writes, [
+      { name: 'phogaem-representative-set', body: { albumId: 'album-one', groupId: 'group-one', photoId: 'photo-two' } },
+      { name: 'phogaem-member-name-set', body: { albumId: 'album-one', nickname: '여행 친구' } },
+    ]);
+    server.op = async () => Response.json({ error: 'approval required' }, { status: 403 });
+    await assert.rejects(setRepresentative('album-one', 'group-one', 'photo-two'), ApprovalRequired);
+    await assert.rejects(setMemberNickname('album-one', '친구'), ApprovalRequired);
+  } finally { server.op = original; }
+});
+
+test('a server-selected representative survives candidate transport', async () => {
+  const original = server.op;
+  const group = { id: 'group-one', photoIds: ['photo-one', 'photo-two'], representativeId: 'photo-two' };
+  try {
+    server.op = async () => Response.json({ groups: [group], pending: 0, failed: 0, analyzed: 2 });
+    assert.deepEqual((await getSimilarPhotos('album-one')).groups, [group]);
   } finally { server.op = original; }
 });

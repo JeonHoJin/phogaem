@@ -1,8 +1,8 @@
 import { server, ServerError } from './index.ts';
 import type { PhotoProcessing, ProcessingKind } from '../domain.ts';
 
-export interface Album { id: string; title: string; createdAt: number }
-export interface SharedMember { id: string; name: string; color: string }
+export interface Album { id: string; title: string; createdAt: number; ownerId?: string }
+export interface SharedMember { id: string; name: string; color: string; nickname?: string | null }
 export interface RemotePhoto {
   id: string;
   name: string;
@@ -17,7 +17,7 @@ export interface RemotePhoto {
   processing?: PhotoProcessing;
 }
 export interface SharedAlbum { album: Album; members: SharedMember[]; photos: RemotePhoto[] }
-export interface SimilarGroup { id: string; photoIds: string[] }
+export interface SimilarGroup { id: string; photoIds: string[]; representativeId?: string }
 export interface SimilarPhotos { groups: SimilarGroup[]; pending: number; failed: number; analyzed: number }
 
 
@@ -65,8 +65,8 @@ export function listAlbums(): Promise<{ userId: string; albums: Album[] }> {
   return json('albums');
 }
 
-export async function createAlbum(title: string): Promise<Album> {
-  return (await json<{ album: Album }>('album-create', { title })).album;
+export async function createAlbum(title: string, nickname?: string): Promise<Album> {
+  return (await json<{ album: Album }>('album-create', { title, ...(nickname !== undefined ? { nickname } : {}) })).album;
 }
 
 export function getAlbum(albumId: string): Promise<SharedAlbum> {
@@ -97,7 +97,8 @@ export async function getSimilarPhotos(albumId: string): Promise<SimilarPhotos> 
       if (!identifier(id) || seenPhotos.has(id)) return invalid();
       seenPhotos.add(id); if (seenPhotos.size > 2000) return invalid(); photoIds.push(id);
     }
-    groups.push({ id: group.id, photoIds });
+    if (group.representativeId !== undefined && (!identifier(group.representativeId) || !photoIds.includes(group.representativeId))) return invalid();
+    groups.push({ id: group.id, photoIds, ...(group.representativeId !== undefined ? { representativeId: group.representativeId as string } : {}) });
   }
   return { groups, pending: data.pending as number, failed: data.failed as number, analyzed: data.analyzed as number };
 }
@@ -107,8 +108,8 @@ export function createInvite(albumId: string): Promise<{ token: string; expiresA
   return json('invite-create', { albumId });
 }
 
-export async function joinInvite(token: string): Promise<Album> {
-  return (await json<{ album: Album }>('invite-join', { token })).album;
+export async function joinInvite(token: string, nickname?: string): Promise<Album> {
+  return (await json<{ album: Album }>('invite-join', { token, ...(nickname !== undefined ? { nickname } : {}) })).album;
 }
 
 function fileType(file: File): string {
@@ -277,4 +278,13 @@ export async function retryProcessing(albumId: string, photoId: string, kind: Pr
 
 export async function setSharedDownloadState(albumId: string, photoIds: string[], state: 'requested' | 'received' | 'reset'): Promise<void> {
   await json('download-state', { albumId, photoIds, state });
+}
+
+
+export function setRepresentative(albumId: string, groupId: string, photoId: string): Promise<{ ok: boolean }> {
+  return json('representative-set', { albumId, groupId, photoId });
+}
+
+export function setMemberNickname(albumId: string, nickname: string, userId?: string): Promise<{ ok: boolean }> {
+  return json('member-name-set', { albumId, nickname, ...(userId ? { userId } : {}) });
 }

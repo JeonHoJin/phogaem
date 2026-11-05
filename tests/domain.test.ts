@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { filterPhotos, matchesFilters, hashBlob, formatBytes, defaultAlbumName, mergeUploadedPhoto } from '../apps/web/src/domain.ts';
+import { filterPhotos, matchesFilters, hashBlob, formatBytes, defaultAlbumName, mergeUploadedPhoto, buildPhotoStacks, representativeDownloadIds } from '../apps/web/src/domain.ts';
 import type { Photo } from '../apps/web/src/domain.ts';
 
 function photo(overrides: Partial<Photo> = {}): Photo {
@@ -85,4 +85,32 @@ test('duplicates includes comparison candidates while retaining exact imports an
   assert.equal(matchesFilters(similar, ['duplicates', 'others'], 'me', ids), false);
   assert.equal(matchesFilters(similar, ['duplicates'], 'me'), false);
   assert.equal(similar.importCount, 1);
+});
+
+
+test('photo stacks put the stored representative first while retaining every original and stable stack order', () => {
+  const first = photo({ id: 'first' }); const second = photo({ id: 'second' }); const single = photo({ id: 'single' });
+  const photos = [first, single, second];
+  const stacks = buildPhotoStacks(photos, [{ id: 'group', photoIds: ['first', 'second'], representativeId: 'second' }]);
+  assert.deepEqual(stacks.map(stack => stack.representative.id), ['second', 'single']);
+  assert.deepEqual(stacks[0]!.photos, [second, first]);
+  assert.deepEqual(photos, [first, single, second]);
+  assert.equal(stacks[0]!.photos[0]!.blob, second.blob);
+});
+
+test('unknown candidate ids cannot hide a lone known photo and missing representative uses a known member', () => {
+  const first = photo({ id: 'first' }); const second = photo({ id: 'second' });
+  assert.deepEqual(buildPhotoStacks([first], [{ id: 'foreign', photoIds: ['first', 'unknown'] }]).map(stack => stack.id), ['first']);
+  const stacks = buildPhotoStacks([first, second], [{ id: 'group', photoIds: ['unknown', 'second', 'first'], representativeId: 'unknown' }]);
+  assert.equal(stacks.length, 1);
+  assert.equal(stacks[0]!.representative.id, 'second');
+});
+
+test('download ids collapse selected members to one representative per stack and retain separate originals', () => {
+  const first = photo({ id: 'first' }); const second = photo({ id: 'second' }); const single = photo({ id: 'single' });
+  const stacks = buildPhotoStacks([first, second, single], [{ id: 'group', photoIds: ['first', 'second'], representativeId: 'second' }]);
+  assert.deepEqual(representativeDownloadIds(['first', 'second', 'single', 'unknown', 'first'], stacks), ['second', 'single']);
+  assert.deepEqual(representativeDownloadIds(['first'], stacks), ['second']);
+  assert.deepEqual(first.requestedBy, []);
+  assert.deepEqual(second.receivedBy, []);
 });

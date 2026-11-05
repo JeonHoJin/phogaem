@@ -28,6 +28,8 @@ async function openShared(page: Page, initial: PhotoProcessing) {
         album: { id: albumId, title: '처리 검증 여행', createdAt: 1 }, members: [{ id: userId, name: '나', color: '#c5d6c4' }],
         photos: [{ id: photoId, name: 'synthetic.png', type: 'image/png', size: pixel.length, hash: 'synthetic-hash', createdAt: 1, contributors: [userId], requestedBy: [], receivedBy: [], importCount: 1, processing: model.processing }],
       } });
+    } else if (operation === 'phogaem-similar-get') {
+      await route.fulfill({ json: { groups: [], pending: model.processing.vision.state === 'pending' || model.processing.vision.state === 'running' ? 1 : 0, failed: model.processing.vision.state === 'failed' ? 1 : 0, analyzed: model.processing.vision.state === 'succeeded' ? 1 : 0 } });
     } else if (operation === 'phogaem-thumbnail-get' || operation === 'phogaem-photo-get') {
       if (operation === 'phogaem-thumbnail-get') model.thumbnails += 1;
       else model.originals += 1;

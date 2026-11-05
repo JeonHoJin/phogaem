@@ -81,3 +81,31 @@ export function mergeUploadedPhoto(photos: Photo[], incoming: Photo): Photo[] {
   } : incoming;
   return [updated, ...photos.filter(photo => photo.id !== incoming.id)].sort((a, b) => b.createdAt - a.createdAt);
 }
+
+
+export interface PhotoGroup { id: string; photoIds: string[]; representativeId?: string }
+export interface PhotoStack { id: string; representative: Photo; photos: Photo[] }
+
+export function buildPhotoStacks(photos: Photo[], groups: PhotoGroup[]): PhotoStack[] {
+  const known = new Map(photos.map(photo => [photo.id, photo]));
+  const grouped = new Map<string, PhotoStack>();
+  for (const group of groups) {
+    const members = group.photoIds.map(id => known.get(id)).filter((photo): photo is Photo => !!photo);
+    if (members.length < 2) continue;
+    const representative = members.find(photo => photo.id === group.representativeId) ?? members[0]!;
+    const stack = { id: group.id, representative, photos: [representative, ...members.filter(photo => photo.id !== representative.id)] };
+    for (const photo of members) grouped.set(photo.id, stack);
+  }
+  const emitted = new Set<string>();
+  return photos.flatMap(photo => {
+    const stack = grouped.get(photo.id) ?? { id: photo.id, representative: photo, photos: [photo] };
+    if (emitted.has(stack.representative.id)) return [];
+    emitted.add(stack.representative.id);
+    return [stack];
+  });
+}
+
+export function representativeDownloadIds(ids: string[], stacks: PhotoStack[]): string[] {
+  const representative = new Map(stacks.flatMap(stack => stack.photos.map(photo => [photo.id, stack.representative.id] as const)));
+  return [...new Set(ids.map(id => representative.get(id)).filter((id): id is string => !!id))];
+}

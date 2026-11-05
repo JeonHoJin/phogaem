@@ -45,6 +45,10 @@ Reuse tokens in apps/web/src/styles.css: warm off-white canvas, white surfaces, 
 Use consistent local SVG icons for upload, download, selection, receipt, retry, lock, connectivity, copy, fullscreen and playback. Each state must have a shape/icon and stable layout representation; motion supplements it. Numeric upload progress may use `12/48` and a progress track. Photos and explicit synthetic sample thumbnails supply imagery. No remote fonts, images or analytics.
 
 ## Components
+
+Similar photos collapse into a single photo stack in the normal album grid. The shared representative appears in front, with offset cards and a numeric count behind it. Clicking the stack opens its authorized members, including members excluded by individual-photo filters; filters decide whether the representative card appears. A star control changes the shared representative. Gallery selection and every new download use one representative per stack, plus ungrouped singles. Originals remain available for explicit viewing. Do not imply the initial deterministic representative is an AI quality winner.
+
+A member without a nickname receives a focused nickname form on entry. Names are local to a library, 1–24 characters, and are stored on the server. Members, including the owner, set their own names. Legacy members are prompted at next entry. Names appear on uploads and member avatars; no instructional paragraphs are added.
 Reuse BrandMark, native controls, filter chips, photo cards, photo grid, selection tray and fullscreen viewer. Evolve the shared manager into library-list, sign-in, invitation and account surfaces. Add item-level upload progress/retry states, a lock/pending access surface and a receipt toggle with distinct requested/confirmed appearances.
 
 Add candidate group cards and a comparison modal using existing Preview, Modal and selection controls. Candidate loading/error/empty states use icons, numeric counts and explicit refresh/retry. Stale requests cannot restore data after source/album changes or approval denial.
@@ -94,7 +98,7 @@ Shared originals are lazy, paced and released offscreen. Shared limit remains 16
 Acceptance for the UI migration: traverse normal, empty, loading, failed, offline, pending/revoked approval, expired invitation, unsupported preview and partial-upload/download flows without app-owned guidance copy; verify useful recovery and no false success. Check semantic accessibility and 390px/1920px layouts. Existing tests asserting explanatory text must migrate to state/action/result assertions while retaining security and byte-preservation coverage. No automatic approval, production test identities or real user-photo fixtures.
 
 ## Open questions
-- [ ] Product/implementation: choose participant display-name capture/management; names must identify actual contributors without instructional onboarding.
+- [x] Product/implementation: each member sets an album-local nickname on entry, using a field and completion action without instructional onboarding.
 - [ ] Implementation: validate batch delivery on physical mobile browsers; ZIP byte preservation and separate receipt states are covered by automated browser tests.
 - [ ] Implementation: validate whether icon/shape/action vocabulary makes pending access, deterministic rejection and unavailable previews understandable on mobile; improve the structure if testing exposes ambiguity.
 - [ ] Product: retention duration and future R2 authorization remain separate decisions, with no cloud cost introduced by this contract.
