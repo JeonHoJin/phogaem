@@ -263,6 +263,7 @@ test('approval gates all photo operations, invitations cannot bypass it, and rev
     ['phogaem-album-get', 'GET'], ['phogaem-invite-create', 'POST'],
     ['phogaem-invite-join', 'POST'], ['phogaem-photo-upload', 'POST'],
     ['phogaem-photo-get', 'GET'], ['phogaem-download-state', 'POST'],
+    ['phogaem-thumbnail-get', 'GET'], ['phogaem-processing-retry', 'POST'],
   ];
   for (const [operation, method] of operations) {
     const denied = await page.request.fetch(`${apiBase}/op/${operation}/v1`, {

@@ -1,4 +1,5 @@
 import { server, ServerError } from './index.ts';
+import type { PhotoProcessing, ProcessingKind } from '../domain.ts';
 
 export interface Album { id: string; title: string; createdAt: number }
 export interface SharedMember { id: string; name: string; color: string }
@@ -13,6 +14,7 @@ export interface RemotePhoto {
   requestedBy: string[];
   receivedBy: string[];
   importCount: number;
+  processing?: PhotoProcessing;
 }
 export interface SharedAlbum { album: Album; members: SharedMember[]; photos: RemotePhoto[] }
 
@@ -211,12 +213,12 @@ function retryDelay(response: Response): number {
   return Math.min(3000, Math.max(350, Number.isFinite(delay) ? delay : 1000));
 }
 
-export async function getPhotoBlob(albumId: string, photoId: string): Promise<Blob> {
+async function getImageBlob(operation: 'photo-get' | 'thumbnail-get', albumId: string, photoId: string): Promise<Blob> {
   // The gateway allows 5 requests/sec per IP. Pace originals and keep at most two in flight;
   // metadata and mutations stay outside this queue. Only this idempotent GET retries a 429.
   for (let attempt = 0; ; attempt += 1) {
     const { response, blob } = await queuedOriginal(async () => {
-      const response = await server.op('phogaem-photo-get', { version: 'v1', method: 'GET', query: { albumId, photoId } });
+      const response = await server.op(`phogaem-${operation}`, { version: 'v1', method: 'GET', query: { albumId, photoId } });
       return { response, blob: response.ok ? await response.blob() : undefined };
     });
     if (response.status === 429 && attempt === 0) {
@@ -226,6 +228,18 @@ export async function getPhotoBlob(albumId: string, photoId: string): Promise<Bl
     await checked(response);
     return blob!;
   }
+}
+
+export function getPhotoBlob(albumId: string, photoId: string): Promise<Blob> {
+  return getImageBlob('photo-get', albumId, photoId);
+}
+
+export function getThumbnailBlob(albumId: string, photoId: string): Promise<Blob> {
+  return getImageBlob('thumbnail-get', albumId, photoId);
+}
+
+export async function retryProcessing(albumId: string, photoId: string, kind: ProcessingKind): Promise<void> {
+  await json('processing-retry', { albumId, photoId, kind });
 }
 
 export async function setSharedDownloadState(albumId: string, photoIds: string[], state: 'requested' | 'received' | 'reset'): Promise<void> {

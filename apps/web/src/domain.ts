@@ -1,5 +1,10 @@
 export type MemberId = string;
 
+export type ProcessingKind = 'thumbnail' | 'vision';
+export type ProcessingState = 'pending' | 'running' | 'succeeded' | 'failed';
+export interface ProcessingJob { state: ProcessingState; attempts: number }
+export type PhotoProcessing = Record<ProcessingKind, ProcessingJob>;
+
 export interface Photo {
   id: string;
   name: string;
@@ -13,6 +18,7 @@ export interface Photo {
   blob?: Blob;
   albumId?: string;
   importCount?: number;
+  processing?: PhotoProcessing;
 }
 
 export type PhotoFilter = 'all' | 'others' | 'mine' | 'duplicates' | 'unreceived';

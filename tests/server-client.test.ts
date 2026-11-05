@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { ServerClient, ServerError, base64url, fromBase64url } from '../apps/web/src/server/client.ts';
 import type { KeyStore } from '../apps/web/src/server/client.ts';
 import { API_BASE, deviceKeyNamespace, server, validateApiBase } from '../apps/web/src/server/index.ts';
-import { getAlbum, getPhotoBlob, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
+import { getAlbum, getPhotoBlob, getThumbnailBlob, retryProcessing, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
 import { creationOptions, requestOptions } from '../apps/web/src/server/passkey.ts';
 
 function memoryKeys() {
@@ -583,4 +583,26 @@ test('an approval observer fires before in-flight writes drain and cannot mask t
     first.resolve(Response.json({ added: true, photo: uploadFixture(0) }));
     await failure;
   } finally { first.resolve(Response.json({ added: true, photo: uploadFixture(0) })); await failure; server.op = originalOp; }
+});
+
+test('thumbnail reads use the protected thumbnail operation and retries retain approval denial', async () => {
+  const originalOp = server.op;
+  const calls: { name: string; init: Parameters<typeof server.op>[1] }[] = [];
+  server.op = async (name, init) => {
+    calls.push({ name, init });
+    if (name === 'phogaem-thumbnail-get') return new Response('synthetic-webp', { headers: { 'content-type': 'image/webp' } });
+    return Response.json({ ok: true });
+  };
+  try {
+    const thumbnail = await getThumbnailBlob('album', 'photo');
+    assert.equal(thumbnail.type, 'image/webp');
+    assert.equal(await thumbnail.text(), 'synthetic-webp');
+    assert.equal(calls[0]!.name, 'phogaem-thumbnail-get');
+    assert.deepEqual(calls[0]!.init?.query, { albumId: 'album', photoId: 'photo' });
+    await retryProcessing('album', 'photo', 'vision');
+    assert.equal(calls[1]!.name, 'phogaem-processing-retry');
+    assert.deepEqual(JSON.parse(String(calls[1]!.init?.body)), { albumId: 'album', photoId: 'photo', kind: 'vision' });
+    server.op = async () => Response.json({ error: 'approval required' }, { status: 403 });
+    await assert.rejects(retryProcessing('album', 'photo', 'thumbnail'), ApprovalRequired);
+  } finally { server.op = originalOp; }
 });

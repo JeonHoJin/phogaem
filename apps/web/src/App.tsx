@@ -7,12 +7,14 @@ import type { ChangeEvent, DragEvent, ReactNode } from 'react';
 import { server, ServerError } from './server/index';
 import { createPhotoArchive, validateArchiveSize, MAX_ARCHIVE_BYTES } from './archive';
 import { MEMBERS, defaultAlbumName, mergeUploadedPhoto, filterPhotos, formatBytes, matchesFilters } from './domain';
-import type { MemberId, Photo, PhotoFilter } from './domain';
+import type { MemberId, Photo, PhotoFilter, ProcessingKind, ProcessingJob } from './domain';
 import { validateFile as validateLocalFile, importPhotos, loadPhotos, loadPreferences, savePreferences, seedDemo, setDownloadState } from './storage';
 
-type IconName = 'plus' | 'arrow' | 'download' | 'check' | 'close' | 'left' | 'right' | 'expand' | 'play' | 'pause' | 'image' | 'layers' | 'lock' | 'retry' | 'alert' | 'copy' | 'user';
+type IconName = 'plus' | 'arrow' | 'download' | 'check' | 'close' | 'left' | 'right' | 'expand' | 'play' | 'pause' | 'image' | 'layers' | 'lock' | 'retry' | 'alert' | 'copy' | 'user' | 'clock' | 'sparkles';
 function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, ReactNode> = {
+    clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
+    sparkles: <><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z" /><path d="M20 2v4m-2-2h4" /></>,
     lock: <><rect x="5" y="10" width="14" height="11" rx="3" /><path d="M8 10V7a4 4 0 0 1 8 0v3" /></>,
     retry: <><path d="M20 7v5h-5M4 17v-5h5" /><path d="M6 8a7 7 0 0 1 12-2l2 3M4 15l2 3a7 7 0 0 0 12-2" /></>,
     alert: <><path d="M12 3 2 21h20Z" /><path d="M12 9v5m0 3v1" /></>,
@@ -45,6 +47,7 @@ const FILTERS: { id: PhotoFilter; label: string }[] = [
 // Remote originals are loaded only near the viewport and released when off-screen.
 // This map deduplicates in-flight reads; it does not retain all original blobs.
 const originalReads = new Map<string, Promise<Blob>>();
+const thumbnailReads = new Map<string, Promise<Blob>>();
 const ApprovalContext = createContext<(error: ApprovalRequired) => void>(() => {});
 async function originalBlob(photo: Photo): Promise<Blob> {
   if (photo.blob) return photo.blob;
@@ -58,6 +61,17 @@ async function originalBlob(photo: Photo): Promise<Blob> {
   return pending;
 }
 
+async function thumbnailBlob(photo: Photo): Promise<Blob> {
+  if (!photo.albumId) throw new Error('사진의 보관함을 찾지 못했어요.');
+  const key = `${photo.albumId}:${photo.id}`;
+  let pending = thumbnailReads.get(key);
+  if (!pending) {
+    pending = sharedApi.getThumbnailBlob(photo.albumId, photo.id).finally(() => thumbnailReads.delete(key));
+    thumbnailReads.set(key, pending);
+  }
+  return pending;
+}
+
 function Preview({ photo, large = false }: { photo: Photo; large?: boolean }) {
   const container = useRef<HTMLDivElement>(null);
   const onApprovalRequired = useContext(ApprovalContext);
@@ -66,6 +80,7 @@ function Preview({ photo, large = false }: { photo: Photo; large?: boolean }) {
   const [error, setError] = useState('');
   const [decodeFailed, setDecodeFailed] = useState(false);
   const [retry, setRetry] = useState(0);
+  const thumbnailState = !large && photo.albumId ? photo.processing?.thumbnail.state : undefined;
   useEffect(() => {
     if (photo.blob || large || !container.current) return;
     const observer = new IntersectionObserver(([entry]) => setNear(entry.isIntersecting), { rootMargin: '150px' });
@@ -73,11 +88,11 @@ function Preview({ photo, large = false }: { photo: Photo; large?: boolean }) {
     return () => observer.disconnect();
   }, [photo.blob, large]);
   useEffect(() => {
-    if (!near) { setUrl(''); return; }
+    if (!near || (thumbnailState !== undefined && thumbnailState !== 'succeeded')) { setUrl(''); setError(''); setDecodeFailed(false); return; }
     let active = true;
     let objectUrl = '';
     setError(''); setDecodeFailed(false);
-    originalBlob(photo).then(blob => {
+    (thumbnailState ? thumbnailBlob(photo) : originalBlob(photo)).then(blob => {
       if (!active) return;
       objectUrl = URL.createObjectURL(blob);
       setUrl(objectUrl);
@@ -87,12 +102,18 @@ function Preview({ photo, large = false }: { photo: Photo; large?: boolean }) {
       else setError('사진을 불러오지 못했어요.');
     });
     return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
-  }, [photo.id, photo.albumId, photo.blob, near, retry, onApprovalRequired]);
-  return <div ref={container} className="preview-container">{error || decodeFailed ? <div className="preview-fallback" role="img" aria-label="미리보기 없음"><Icon name={error ? 'alert' : 'image'} size={large ? 52 : 30} />{error && large && <button className="icon-button" aria-label="미리보기 재시도" onClick={() => setRetry(retry + 1)}><Icon name="retry" /></button>}</div>
+  }, [photo.id, photo.albumId, photo.blob, thumbnailState, near, retry, onApprovalRequired]);
+  return <div ref={container} className="preview-container">{thumbnailState && thumbnailState !== 'succeeded' ? <span className="preview-loading" role="img" aria-label={`${photo.name} 미리보기 ${thumbnailState === 'failed' ? '없음' : '준비 중'}`}><Icon name={thumbnailState === 'pending' ? 'clock' : thumbnailState === 'running' ? 'retry' : 'image'} size={32} /></span> : error || decodeFailed ? <div className="preview-fallback" role="img" aria-label="미리보기 없음"><Icon name={error ? 'alert' : 'image'} size={large ? 52 : 30} />{error && large && <button className="icon-button" aria-label="미리보기 재시도" onClick={() => setRetry(retry + 1)}><Icon name="retry" /></button>}</div>
     : url ? <img src={url} alt={photo.name} loading={large ? 'eager' : 'lazy'} onError={() => setDecodeFailed(true)} /> : <span className="preview-loading" aria-label="사진 불러오는 중"><Icon name="image" size={large ? 40 : 24} /></span>}</div>;
 }
 
-function PhotoCard({ photo, member, members, selected, onSelect, onView }: { photo: Photo; member: MemberId; members: SharedMember[]; selected: boolean; onSelect: () => void; onView: () => void }) {
+function ProcessingIndicator({ photo, kind, job, disabled, onRetry }: { photo: Photo; kind: ProcessingKind; job: ProcessingJob; disabled: boolean; onRetry: () => void }) {
+  const label = `${photo.name} ${kind === 'thumbnail' ? '썸네일' : '사진 분석'} ${({ pending: '대기', running: '진행 중', succeeded: '완료', failed: '재시도' })[job.state]}`;
+  const content = <><Icon name={kind === 'thumbnail' ? 'image' : 'sparkles'} size={15} /><Icon name={job.state === 'pending' ? 'clock' : job.state === 'running' || job.state === 'failed' ? 'retry' : 'check'} size={13} /></>;
+  return job.state === 'failed' ? <button className="processing-state failed" aria-label={label} disabled={disabled} onClick={onRetry}>{content}</button> : <span className={`processing-state ${job.state}`} role="img" aria-label={label}>{content}</span>;
+}
+
+function PhotoCard({ photo, member, members, selected, onSelect, onView, onRetry, busy }: { photo: Photo; member: MemberId; members: SharedMember[]; selected: boolean; onSelect: () => void; onView: () => void; onRetry: (kind: ProcessingKind) => void; busy: boolean }) {
   const received = photo.receivedBy.includes(member);
   const duplicate = (photo.importCount ?? photo.contributors.length) > 1;
   return <article className={`photo-card ${selected ? 'is-selected' : ''}`}>
@@ -103,6 +124,7 @@ function PhotoCard({ photo, member, members, selected, onSelect, onView }: { pho
       {received && <span className="photo-badge received"><Icon name="check" size={13} /></span>}
     </div>
     <div className="photo-info"><span className="photo-name">{photo.name}</span><span className="photo-size">{formatBytes(photo.size)}</span></div>
+    {photo.processing && <div className="processing-states" aria-label={`${photo.name} 처리 상태`}>{(['thumbnail', 'vision'] as const).map(kind => <ProcessingIndicator key={kind} photo={photo} kind={kind} job={photo.processing![kind]} disabled={busy} onRetry={() => onRetry(kind)} />)}</div>}
     <div className="photo-meta"><span>{photo.contributors.map(id => members.find(m => m.id === id)?.name ?? id).join(' · ')}</span><span aria-label={received ? '받았음 확인' : photo.requestedBy.includes(member) ? '다운로드 요청됨' : '원본'}>{photo.requestedBy.includes(member) && <Icon name={received ? 'check' : 'download'} size={14} />}</span></div>
   </article>;
 }
@@ -176,6 +198,7 @@ export default function App() {
   const [inviteExpires, setInviteExpires] = useState(0);
   const operation = useRef(false);
   const sourceEpoch = useRef(0);
+  const mutationEpoch = useRef(0);
   const [approvalCode, setApprovalCode] = useState<string | null>(null);
   const member = remote?.userId ?? localMember;
   const members = remote?.members ?? MEMBERS;
@@ -233,15 +256,49 @@ export default function App() {
 
   const approvalDenied = useCallback((reason: ApprovalRequired) => {
     sourceEpoch.current += 1;
-    originalReads.clear();
+    originalReads.clear(); thumbnailReads.clear();
     setApprovalCode(reason.accountCode);
     setRemote(null); setPhotos([]); setSelected(new Set());
     setViewerId(null); setDownloadIds(null); setInviteLink('');
     retryAction.current = null; setNotice(''); setError(''); setManagerOpen(true); setLocalMode(false);
   }, []);
 
+  const activeAlbumId = remote?.album?.id;
+  const albumIdentity = useRef(activeAlbumId);
+  albumIdentity.current = activeAlbumId;
+  const hasProcessing = photos.some(photo => photo.processing && Object.values(photo.processing).some(job => job.state === 'pending' || job.state === 'running'));
+  useEffect(() => {
+    if (!activeAlbumId || !hasProcessing) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const epoch = sourceEpoch.current;
+    const poll = async () => {
+      if (!active || epoch !== sourceEpoch.current || albumIdentity.current !== activeAlbumId) return;
+      if (!operation.current) {
+        const revision = mutationEpoch.current;
+        try {
+          const result = await sharedApi.getAlbum(activeAlbumId);
+          if (!active || epoch !== sourceEpoch.current || albumIdentity.current !== activeAlbumId) return;
+          if (!operation.current && revision === mutationEpoch.current) {
+            setRemote(previous => previous?.album?.id === activeAlbumId ? { ...previous, album: result.album, members: result.members } : previous);
+            setPhotos(result.photos.map(photo => ({ ...photo, albumId: activeAlbumId })));
+            if (!result.photos.some(photo => photo.processing && Object.values(photo.processing).some(job => job.state === 'pending' || job.state === 'running'))) return;
+          }
+        } catch (reason) {
+          if (!active || epoch !== sourceEpoch.current || albumIdentity.current !== activeAlbumId) return;
+          if (reason instanceof ApprovalRequired) { approvalDenied(reason); return; }
+          setError(reason instanceof Error ? reason.message : '처리 상태 조회 실패');
+        }
+      }
+      if (active) timer = setTimeout(() => { void poll(); }, 4000);
+    };
+    timer = setTimeout(() => { void poll(); }, 4000);
+    return () => { active = false; if (timer !== undefined) clearTimeout(timer); };
+  }, [activeAlbumId, hasProcessing, approvalDenied]);
+
   async function mutate(action: () => Promise<Photo[]>, success?: string, changesSource = false, retryable = false) {
     if (operation.current) return;
+    mutationEpoch.current += 1;
     operation.current = true; setBusy(true); setError(''); retryAction.current = retryable ? action : null;
     if (changesSource) sourceEpoch.current += 1;
     const epoch = sourceEpoch.current;
@@ -328,6 +385,13 @@ export default function App() {
     if (remote?.album?.id !== id) setPhotos([]);
     setRemote(previous => previous ? { ...previous, album: result.album, members: result.members } : previous);
     return result.photos.map(photo => ({ ...photo, albumId: id }));
+  }
+  async function retryPhotoProcessing(photo: Photo, kind: ProcessingKind) {
+    if (!photo.albumId) return;
+    await mutate(async () => {
+      await sharedApi.retryProcessing(photo.albumId!, photo.id, kind);
+      return refreshAlbum(photo.albumId!);
+    });
   }
   function clearTransient() {
     setSelected(new Set()); setViewerId(null); setDownloadIds(null); setInviteLink(''); setNotice(''); setCopied(false); setQueuedFiles([]); setProgress(null);
@@ -454,7 +518,7 @@ export default function App() {
         <section className="library" aria-label="사진 보관함"><div className="library-top"><span>{photos.length}</span><button className="text-button" disabled={!pendingPhotos.length || busy} onClick={() => setDownloadIds(pendingPhotos.map(p => p.id))}><Icon name="download" size={16} />다운로드 기록 {pendingPhotos.length > 0 && <span>{pendingPhotos.length}</span>}</button></div>
           <div className="filter-row"><div className="filter-chips" aria-label="사진 필터">{FILTERS.map(filter => <button key={filter.id} className={`filter-chip ${filters.includes(filter.id) ? 'active' : ''}`} aria-label={filter.label} aria-pressed={filters.includes(filter.id)} onClick={() => toggleFilter(filter.id)}>{({ all: '전체', others: '내 사진 제외', mine: '내 사진', unreceived: '받은 사진 제외', duplicates: '중복' })[filter.id]}{filter.id === 'duplicates' && duplicateCount > 0 && <span>{duplicateCount}</span>}</button>)}</div></div>
           <div className="selection-row"><label className="select-all"><input type="checkbox" aria-label="현재 사진 전체 선택" checked={visible.length > 0 && visible.every(p => selected.has(p.id))} disabled={!visible.length || busy} onChange={event => setSelected(event.target.checked ? new Set(visible.map(p => p.id)) : new Set())} />전체 선택</label><span>{visible.length}</span></div>
-          {loading ? <div className="empty-state" aria-label="보관함 불러오는 중"><span className="loading-dot" /></div> : photos.length === 0 ? <div className="empty-state"><Icon name="image" size={56} /><button className="button primary" aria-label="첫 사진 올리기" disabled={busy} onClick={() => fileInput.current?.click()}><Icon name="plus" />올리기</button></div> : !visible.length ? <div className="empty-state"><Icon name="image" size={48} /><button className="button secondary" onClick={() => setFilters(['all'])}>필터 초기화</button></div> : <div className="photo-grid">{visible.map(photo => <PhotoCard key={photo.id} photo={photo} member={member} members={members} selected={selected.has(photo.id)} onSelect={() => selectPhoto(photo.id)} onView={() => setViewerId(photo.id)} />)}<button className="add-card" aria-label="사진 더 올리기" disabled={busy} onClick={() => fileInput.current?.click()}><Icon name="plus" size={32} /></button></div>}
+          {loading ? <div className="empty-state" aria-label="보관함 불러오는 중"><span className="loading-dot" /></div> : photos.length === 0 ? <div className="empty-state"><Icon name="image" size={56} /><button className="button primary" aria-label="첫 사진 올리기" disabled={busy} onClick={() => fileInput.current?.click()}><Icon name="plus" />올리기</button></div> : !visible.length ? <div className="empty-state"><Icon name="image" size={48} /><button className="button secondary" onClick={() => setFilters(['all'])}>필터 초기화</button></div> : <div className="photo-grid">{visible.map(photo => <PhotoCard key={photo.id} photo={photo} member={member} members={members} selected={selected.has(photo.id)} onSelect={() => selectPhoto(photo.id)} onView={() => setViewerId(photo.id)} busy={busy} onRetry={kind => void retryPhotoProcessing(photo, kind)} />)}<button className="add-card" aria-label="사진 더 올리기" disabled={busy} onClick={() => fileInput.current?.click()}><Icon name="plus" size={32} /></button></div>}
         </section>
       </>}
     </main>
