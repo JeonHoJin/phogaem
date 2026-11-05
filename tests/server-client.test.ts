@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { ServerClient, ServerError, base64url, fromBase64url } from '../apps/web/src/server/client.ts';
 import type { KeyStore } from '../apps/web/src/server/client.ts';
 import { API_BASE, deviceKeyNamespace, server, validateApiBase } from '../apps/web/src/server/index.ts';
-import { getAlbum, getPhotoBlob, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, ApprovalRequired } from '../apps/web/src/server/api.ts';
+import { getAlbum, getPhotoBlob, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
 import { creationOptions, requestOptions } from '../apps/web/src/server/passkey.ts';
 
 function memoryKeys() {
@@ -202,7 +202,7 @@ test('upload validates the entire batch before touching the server', async () =>
   } finally { server.op = originalOp; }
 });
 
-test('shared operations retain server errors and report partial sequential uploads', async () => {
+test('shared operations retain server errors and report partial uploads', async () => {
   const originalOp = server.op;
   const calls: { name: string; init: Parameters<typeof server.op>[1] }[] = [];
   server.op = async (name, init) => {
@@ -429,4 +429,158 @@ test('mid-batch approval revocation retains the typed failure needed to clear pr
     await assert.rejects(uploadSharedPhotos('album', [new File(['one'], 'one.png'), new File(['two'], 'two.png')]),
       (error: unknown) => error instanceof ApprovalRequired && /1장 추가/.test(error.message));
   } finally { server.op = originalOp; }
+});
+
+
+function uploadFixture(index: number) {
+  return { id: `photo-${index}`, name: `${index}.png`, type: 'image/png', size: 1, hash: `hash-${index}`, createdAt: index,
+    contributors: ['user'], requestedBy: [], receivedBy: [], importCount: 1 };
+}
+
+async function waitForUpload(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (!predicate() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(predicate(), true, 'expected upload scheduling event');
+}
+
+test('parallel uploads overlap at most two globally and report actual out-of-order completions', async () => {
+  const originalOp = server.op;
+  const starts: number[] = [];
+  const release = new Map<string, () => void>();
+  let active = 0;
+  let maximum = 0;
+  server.op = async (_name, init) => {
+    const name = init?.query?.name ?? '';
+    starts.push(Date.now()); active += 1; maximum = Math.max(maximum, active);
+    await new Promise<void>(resolve => release.set(name, resolve));
+    active -= 1;
+    const index = Number(name.split('.')[0]);
+    return Response.json({ added: index !== 1, photo: uploadFixture(index) });
+  };
+  const updates: Array<{ completed: number; index: number; indices: number[]; photo: string }> = [];
+  const files = [0, 1, 2].map(index => new File(['x'], `${index}.png`));
+  const first = uploadSharedPhotos('album', files, (completed, event) => updates.push({ completed, index: event.index, indices: event.completedIndices, photo: event.photo.id }));
+  const second = uploadSharedPhotos('other', [new File(['x'], '3.png')]);
+  try {
+    await waitForUpload(() => release.size === 2);
+    assert.equal(active, 2);
+    release.get('1.png')!();
+    await waitForUpload(() => release.has('2.png'));
+    assert.equal(active, 2);
+    release.get('0.png')!();
+    await waitForUpload(() => release.has('3.png'));
+    release.get('2.png')!(); release.get('3.png')!();
+    assert.deepEqual(await first, { added: 2, duplicates: 1 });
+    assert.deepEqual(await second, { added: 1, duplicates: 0 });
+    assert.equal(maximum, 2);
+    assert.deepEqual(updates, [
+      { completed: 1, index: 1, indices: [1], photo: 'photo-1' },
+      { completed: 2, index: 0, indices: [0, 1], photo: 'photo-0' },
+      { completed: 3, index: 2, indices: [0, 1, 2], photo: 'photo-2' },
+    ]);
+    for (let index = 1; index < starts.length; index++) assert.ok(starts[index]! - starts[index - 1]! >= 340, 'global starts remain paced across batches');
+  } finally {
+    for (const resolve of release.values()) resolve();
+    await Promise.allSettled([first, second]); server.op = originalOp;
+  }
+});
+
+test('upload failure stops queued writes and drains successful in-flight writes before reporting retry indices', async () => {
+  const originalOp = server.op;
+  const first = deferred<Response>();
+  let starts = 0;
+  let settled = false;
+  const completed: number[][] = [];
+  server.op = async () => ++starts === 1 ? first.promise : Response.json({ error: 'synthetic unavailable' }, { status: 503 });
+  const batch = uploadSharedPhotos('album', [0, 1, 2, 3].map(index => new File(['x'], `${index}.png`)), (_count, event) => completed.push(event.completedIndices));
+  const failure = assert.rejects(batch, (error: unknown) => {
+    assert.ok(error instanceof ServerError);
+    assert.equal(error.status, 503); assert.equal(getUploadFailureIndex(error), 1);
+    assert.match(error.message, /1장 추가/);
+    return true;
+  });
+  void batch.then(() => { settled = true; }, () => { settled = true; });
+  try {
+    await waitForUpload(() => starts === 2);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    assert.equal(settled, false, 'caller must wait for the original still committing');
+    assert.equal(starts, 2, 'neither queued write starts or retries after failure');
+    first.resolve(Response.json({ added: true, photo: uploadFixture(0) }));
+    await failure;
+    assert.deepEqual(completed, [[0]]);
+    assert.equal(starts, 2);
+  } finally { first.resolve(Response.json({ added: true, photo: uploadFixture(0) })); await failure; server.op = originalOp; }
+});
+
+test('approval denial wins over another parallel upload failure and prevents unscheduled writes', async () => {
+  const originalOp = server.op;
+  const approval = deferred<Response>();
+  const unavailable = deferred<Response>();
+  let starts = 0;
+  let callbacks = 0;
+  server.op = async () => ++starts === 1 ? approval.promise : unavailable.promise;
+  const batch = uploadSharedPhotos('album', [0, 1, 2].map(index => new File(['x'], `${index}.png`)), () => { callbacks += 1; });
+  const failure = assert.rejects(batch, (error: unknown) => error instanceof ApprovalRequired && getUploadFailureIndex(error) === 0);
+  try {
+    await waitForUpload(() => starts === 2);
+    unavailable.resolve(Response.json({ error: 'synthetic unavailable' }, { status: 503 }));
+    await new Promise(resolve => setTimeout(resolve, 400));
+    assert.equal(starts, 2);
+    approval.resolve(Response.json({ error: 'approval required' }, { status: 403 }));
+    await failure;
+    assert.equal(callbacks, 0);
+  } finally {
+    unavailable.resolve(Response.json({ error: 'unavailable' }, { status: 503 }));
+    approval.resolve(Response.json({ error: 'approval required' }, { status: 403 }));
+    await failure; server.op = originalOp;
+  }
+});
+
+
+test('uploads and original previews share a transfer start budget with metadata headroom', async () => {
+  const originalOp = server.op;
+  const starts: Array<{ at: number; kind: string }> = [];
+  server.op = async name => {
+    starts.push({ at: Date.now(), kind: name });
+    return name === 'phogaem-photo-upload'
+      ? Response.json({ added: true, photo: uploadFixture(0) }) : new Response('synthetic original');
+  };
+  try {
+    await Promise.all([
+      uploadSharedPhotos('album', [0, 1, 2].map(index => new File(['x'], `${index}.png`))),
+      ...[0, 1, 2].map(index => getPhotoBlob('album', String(index))),
+    ]);
+    assert.equal(starts.length, 6);
+    for (let index = 1; index < starts.length; index++) assert.ok(starts[index]!.at - starts[index - 1]!.at >= 240, 'mixed transfers reserve at least 250ms between starts');
+    for (const kind of ['phogaem-photo-upload', 'phogaem-photo-get']) {
+      const times = starts.filter(start => start.kind === kind);
+      for (let index = 1; index < times.length; index++) assert.ok(times[index]!.at - times[index - 1]!.at >= 340, 'each transfer class retains its own pacing');
+    }
+  } finally { server.op = originalOp; }
+});
+
+
+test('an approval observer fires before in-flight writes drain and cannot mask the denial', async () => {
+  const originalOp = server.op;
+  const first = deferred<Response>();
+  const notified = deferred<void>();
+  let starts = 0;
+  let settled = false;
+  server.op = async () => ++starts === 1 ? first.promise : Response.json({ error: 'approval required' }, { status: 403 });
+  const observed: Array<{ error: unknown; index: number }> = [];
+  const batch = uploadSharedPhotos('album', [0, 1, 2].map(index => new File(['x'], `${index}.png`)), undefined, (error, index) => {
+    observed.push({ error, index }); notified.resolve(); throw new Error('synthetic observer failure');
+  });
+  const failure = assert.rejects(batch, (error: unknown) => error instanceof ApprovalRequired && getUploadFailureIndex(error) === 1);
+  void batch.then(() => { settled = true; }, () => { settled = true; });
+  try {
+    await notified.promise;
+    assert.equal(settled, false, 'public promise still waits for an already-started write');
+    assert.equal(observed.length, 1); assert.equal(observed[0]!.index, 1);
+    assert.ok(observed[0]!.error instanceof ApprovalRequired);
+    await new Promise(resolve => setTimeout(resolve, 400));
+    assert.equal(starts, 2, 'observer failure does not reopen the queue');
+    first.resolve(Response.json({ added: true, photo: uploadFixture(0) }));
+    await failure;
+  } finally { first.resolve(Response.json({ added: true, photo: uploadFixture(0) })); await failure; server.op = originalOp; }
 });

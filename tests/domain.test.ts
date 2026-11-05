@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { filterPhotos, matchesFilters, hashBlob, formatBytes } from '../apps/web/src/domain.ts';
+import { filterPhotos, matchesFilters, hashBlob, formatBytes, defaultAlbumName, mergeUploadedPhoto } from '../apps/web/src/domain.ts';
 import type { Photo } from '../apps/web/src/domain.ts';
 
 function photo(overrides: Partial<Photo> = {}): Photo {
@@ -56,4 +56,20 @@ test('byte formatting handles units, zero and invalid values', () => {
   assert.equal(formatBytes(50 * 1024 * 1024), '50 MB');
   assert.equal(formatBytes(-10), '0 B');
   assert.equal(formatBytes(Number.NaN), '0 B');
+});
+
+test('default album names use padded local calendar dates', () => {
+  assert.equal(defaultAlbumName(new Date(2026, 0, 2, 0, 30)), '260102 여행');
+  assert.equal(defaultAlbumName(new Date(2026, 10, 5, 23, 59)), '261105 여행');
+  assert.equal(defaultAlbumName(new Date(2028, 1, 29)), '280229 여행');
+});
+
+test('out-of-order duplicate upload responses cannot reduce contributions or create another card', () => {
+  const previous = photo({ importCount: 3, contributors: ['me', 'mina'] });
+  const older = photo({ importCount: 2, contributors: ['jun'] });
+  const result = mergeUploadedPhoto([previous, photo({ id: 'other', createdAt: 0 })], older);
+  assert.equal(result.length, 2);
+  assert.equal(result[0]!.importCount, 3);
+  assert.deepEqual(result[0]!.contributors, ['me', 'mina', 'jun']);
+  assert.equal(previous.contributors.length, 2);
 });

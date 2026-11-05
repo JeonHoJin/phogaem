@@ -17,6 +17,7 @@
 - [승인 계정 제한과 패스키 공유](docs/approval.md)
 - [GitHub Pages 배포](docs/pages.md)
 - [Gemma 이미지 분석 실험 결과](docs/vision-experiment.md)
+- [썸네일 생성·캐시 검토](docs/thumbnail-cache.md)
 
 ## 개발 원칙
 

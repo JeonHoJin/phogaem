@@ -21,7 +21,7 @@ About four travel friends: a phone user contributing photos, a returning partici
 ## Information architecture
 - `/phogaem/` enters sign-in or the participant's library list. Existing identity may resume its session; first visit alone must not create an identity or open a passkey prompt.
 - An invitation opens its travel context and preserves that destination through sign-in and approval. Album access begins only after approval, membership checks and explicit participation.
-- Library list: trip cover/name, participant avatars, photo count and create action. New users see the create action without an introductory paragraph.
+- Library list: trip cover/name, participant avatars, photo count and create action. New album names default to the browser-local date as `yymmdd 여행`; preserve edited drafts. New users see the create action without an introductory paragraph.
 - Album: trip name, participants, upload, filters and photo grid. Selection reveals a compact download tray. Viewing and selection are distinct interactions.
 - Viewer: contain-fit photo, previous/next, slideshow, fullscreen and close. Controls can recede during viewing and remain keyboard/touch accessible.
 - Invitation/account actions are secondary controls. No shared-connection management step, storage-mode chooser or technical account explanation in the main journey.

@@ -6,7 +6,7 @@ import { registerPasskey, signInWithPasskey, passkeySupported } from './server/p
 import type { ChangeEvent, DragEvent, ReactNode } from 'react';
 import { server, ServerError } from './server/index';
 import { createPhotoArchive, validateArchiveSize, MAX_ARCHIVE_BYTES } from './archive';
-import { MEMBERS, filterPhotos, formatBytes, matchesFilters } from './domain';
+import { MEMBERS, defaultAlbumName, mergeUploadedPhoto, filterPhotos, formatBytes, matchesFilters } from './domain';
 import type { MemberId, Photo, PhotoFilter } from './domain';
 import { validateFile as validateLocalFile, importPhotos, loadPhotos, loadPreferences, savePreferences, seedDemo, setDownloadState } from './storage';
 
@@ -169,7 +169,8 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const retryAction = useRef<(() => Promise<Photo[]>) | null>(null);
   const [managerOpen, setManagerOpen] = useState(() => new URLSearchParams(location.hash.slice(1)).has('invite'));
-  const [albumTitle, setAlbumTitle] = useState('우리의 여행');
+  const [albumTitle, setAlbumTitle] = useState(defaultAlbumName);
+  const suggestedTitle = useRef(albumTitle);
   const [inviteToken, setInviteToken] = useState(() => new URLSearchParams(location.hash.slice(1)).get('invite') ?? '');
   const [inviteLink, setInviteLink] = useState('');
   const [inviteExpires, setInviteExpires] = useState(0);
@@ -260,23 +261,39 @@ export default function App() {
     await mutate(async () => {
       if (remote) {
         if (!remote.album) throw new Error('먼저 공유보관함을 만들거나 선택해 주세요.');
-        let completed = 0;
+        const completedIndices = new Set<number>();
         try {
-          const result = await sharedApi.uploadSharedPhotos(remote.album.id, files, done => { completed = done; setProgress({ done, total: files.length }); setQueuedFiles(files.slice(done)); });
+          const result = await sharedApi.uploadSharedPhotos(remote.album.id, files, (done, event) => {
+            if (uploadEpoch !== sourceEpoch.current) return;
+            event.completedIndices.forEach(index => completedIndices.add(index));
+            setProgress({ done, total: files.length });
+            setQueuedFiles(files.filter((_, index) => !completedIndices.has(index)));
+            setPhotos(current => mergeUploadedPhoto(current, { ...event.photo, albumId: remote.album!.id }));
+          }, reason => { if (uploadEpoch === sourceEpoch.current && reason instanceof ApprovalRequired) approvalDenied(reason); });
           setNotice(`${result.added}장 추가 · 중복 ${result.duplicates}장`);
         } catch (reason) {
           if (reason instanceof ApprovalRequired) throw reason;
-          if (reason instanceof ServerError && [400, 413, 415].includes(reason.status) && files[completed]) setRejectedFiles(previous => new Set([...previous, files[completed]!]));
+          if (reason instanceof ServerError && [400, 413, 415].includes(reason.status) && sharedApi.getUploadFailureIndex(reason) !== undefined) {
+            const rejected = files[sharedApi.getUploadFailureIndex(reason)!];
+            if (rejected) setRejectedFiles(previous => new Set([...previous, rejected]));
+          }
           // Uploads commit per file: reflect successful earlier files even on a later failure.
           try { const partial = await refreshAlbum(remote.album.id); if (uploadEpoch === sourceEpoch.current) setPhotos(partial); } catch (refreshError) { if (refreshError instanceof ApprovalRequired) throw refreshError; }
           throw reason;
         }
         setQueuedFiles([]); setProgress(null); return refreshAlbum(remote.album.id);
       }
-      const result = await importPhotos(files, member);
+      files.forEach(validateLocalFile);
+      let added = 0; let duplicates = 0; let currentPhotos = photos;
+      for (let index = 0; index < files.length; index += 1) {
+        const result = await importPhotos([files[index]!], member);
+        added += result.added; duplicates += result.duplicates; currentPhotos = result.photos;
+        if (uploadEpoch !== sourceEpoch.current) return currentPhotos;
+        setPhotos(currentPhotos); setProgress({ done: index + 1, total: files.length }); setQueuedFiles(files.slice(index + 1));
+      }
       setQueuedFiles([]); setProgress(null);
-      setNotice(`${result.added}장 추가${result.duplicates ? ` · 중복 ${result.duplicates}장은 원본 하나로 모았어요` : ''}`);
-      return result.photos;
+      setNotice(`${added}장 추가 · 중복 ${duplicates}장`);
+      return currentPhotos;
     });
   }
   function onFiles(event: ChangeEvent<HTMLInputElement>) { void upload(Array.from(event.target.files ?? [])); event.target.value = ''; }
@@ -332,6 +349,12 @@ export default function App() {
     if (!id) return;
     await mutate(async () => { clearTransient(); return refreshAlbum(id); }, undefined, false, true);
   }
+  function openManager() {
+    const today = defaultAlbumName();
+    const previousSuggestion = suggestedTitle.current;
+    setAlbumTitle(current => current === previousSuggestion ? today : current);
+    suggestedTitle.current = today; setManagerOpen(true);
+  }
   async function createSharedAlbum() {
     await mutate(async () => {
       const album = await sharedApi.createAlbum(albumTitle.trim());
@@ -339,6 +362,7 @@ export default function App() {
       setRemote(previous => previous ? { ...previous, albums: result.albums } : previous);
       const loaded = await refreshAlbum(album.id);
       clearTransient(); setManagerOpen(false);
+      suggestedTitle.current = defaultAlbumName(); setAlbumTitle(suggestedTitle.current);
       return loaded;
     }, '새 공유보관함을 만들었어요. 초대 링크로 친구들을 불러보세요.');
   }
@@ -408,7 +432,7 @@ export default function App() {
   return <ApprovalContext.Provider value={approvalDenied}><div className="app-shell" onDragOver={event => { if (!localMode && !remote?.album) return; event.preventDefault(); if (event.dataTransfer.types.includes('Files')) setDragging(true); }}>
     <header className="site-header"><a className="brand" href={import.meta.env.BASE_URL} aria-label="포갬 홈"><span className="brand-mark"><i /><i /></span><span>phogaem<span className="brand-dot">.</span></span></a><div className="header-right">
       {localMode && <button className="text-button" onClick={() => { setLocalMode(false); setPhotos([]); }} disabled={busy}>보관함</button>}
-      {remote && <button className="icon-button" aria-label="계정" disabled={busy} onClick={() => setManagerOpen(true)}><Icon name="user" /></button>}
+      {remote && <button className="icon-button" aria-label="계정" disabled={busy} onClick={openManager}><Icon name="user" /></button>}
       {(remote || localMode) && <span className="avatar" style={{ background: activeMember.color }}>{activeMember.name.slice(0, 1)}</span>}
     </div></header>
     <div className="visually-hidden" role="alert">{error}</div><div className="visually-hidden" role="status" aria-live="polite">{notice}</div>
@@ -421,10 +445,10 @@ export default function App() {
         <div className="entry-actions"><button className="button primary" disabled={busy || loading || !passkeySupported()} onClick={() => void connectShared(true)}>로그인</button><button className="button secondary" disabled={busy || loading} onClick={() => void connectShared()}>시작</button></div>
         <button className="text-button" disabled={busy} onClick={() => void returnLocal()}>기기 보관함</button>{errorControl()}
       </section> : remote && !remote.album ? <section aria-label="여행 보관함 목록">
-        <div className="list-actions"><button className="button primary" disabled={busy} onClick={() => setManagerOpen(true)}><Icon name="plus" />만들기</button><button className="button secondary" disabled={busy} onClick={() => setManagerOpen(true)}>참여</button><button className="icon-button" aria-label="보관함 목록 새로고침" disabled={busy} onClick={() => void connectShared()}><Icon name="retry" /></button></div>
+        <div className="list-actions"><button className="button primary" disabled={busy} onClick={openManager}><Icon name="plus" />만들기</button><button className="button secondary" disabled={busy} onClick={openManager}>참여</button><button className="icon-button" aria-label="보관함 목록 새로고침" disabled={busy} onClick={() => void connectShared()}><Icon name="retry" /></button></div>
         {errorControl()}<div className="album-grid">{remote.albums.map(album => <button className="album-card" key={album.id} disabled={busy} onClick={() => void selectAlbum(album.id)}><Icon name="layers" size={36} /><strong>{album.title}</strong><time>{new Date(album.createdAt).toLocaleDateString('ko-KR')}</time></button>)}</div>
       </section> : <>
-        <div className="shared-toolbar">{remote ? <><select aria-label="공유보관함 선택" value={remote.album?.id ?? ''} disabled={busy} onChange={event => void selectAlbum(event.target.value)}>{remote.albums.map(album => <option key={album.id} value={album.id}>{album.title}</option>)}</select><div className="shared-toolbar-actions"><button className="icon-button" aria-label="새로고침" disabled={busy} onClick={() => void selectAlbum(remote.album!.id)}><Icon name="retry" /></button><button className="text-button" aria-label="초대 링크 만들기" disabled={busy} onClick={() => void invite()}>초대</button><button className="text-button" disabled={busy} onClick={() => setManagerOpen(true)}>보관함 관리</button><button className="text-button" disabled={busy} onClick={() => { sourceEpoch.current += 1; setRemote(previous => previous ? { ...previous, album: null, members: [] } : null); setPhotos([]); clearTransient(); }}>보관함</button></div></> : <><select aria-label="미리보기 사용자" value={localMember} disabled={busy} onChange={event => { setLocalMember(event.target.value); setDownloadIds(null); }}>{MEMBERS.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select><button className="text-button" disabled={busy || photos.length > 0} onClick={() => void mutate(seedDemo)}>샘플</button></>}</div>
+        <div className="shared-toolbar">{remote ? <><select aria-label="공유보관함 선택" value={remote.album?.id ?? ''} disabled={busy} onChange={event => void selectAlbum(event.target.value)}>{remote.albums.map(album => <option key={album.id} value={album.id}>{album.title}</option>)}</select><div className="shared-toolbar-actions"><button className="icon-button" aria-label="새로고침" disabled={busy} onClick={() => void selectAlbum(remote.album!.id)}><Icon name="retry" /></button><button className="text-button" aria-label="초대 링크 만들기" disabled={busy} onClick={() => void invite()}>초대</button><button className="text-button" disabled={busy} onClick={openManager}>보관함 관리</button><button className="text-button" disabled={busy} onClick={() => { sourceEpoch.current += 1; setRemote(previous => previous ? { ...previous, album: null, members: [] } : null); setPhotos([]); clearTransient(); }}>보관함</button></div></> : <><select aria-label="미리보기 사용자" value={localMember} disabled={busy} onChange={event => { setLocalMember(event.target.value); setDownloadIds(null); }}>{MEMBERS.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select><button className="text-button" disabled={busy || photos.length > 0} onClick={() => void mutate(seedDemo)}>샘플</button></>}</div>
         {!managerOpen && !downloadIds && errorControl()}
         {queuedFiles.length > 0 && <section className="upload-queue" aria-label="업로드 파일"><div className="queue-progress">{progress && <><progress value={progress.done} max={progress.total} aria-label="업로드" /><output>{progress.done}/{progress.total}</output></>}</div>{queuedFiles.map((file, index) => <div className="queue-item" key={`${index}:${file.name}`}><Icon name={error ? 'alert' : 'image'} /><span>{file.name}</span><span>{formatBytes(file.size)}</span>{!busy && <button className="icon-button" aria-label={`${file.name} 대기열에서 제거`} onClick={() => { setQueuedFiles(current => current.filter((_, i) => i !== index)); }}><Icon name="close" /></button>}</div>)}{!busy && <button className="button secondary" disabled={!queuedValid} onClick={() => void upload(queuedFiles)}>올리기</button>}</section>}
         <section className="library" aria-label="사진 보관함"><div className="library-top"><span>{photos.length}</span><button className="text-button" disabled={!pendingPhotos.length || busy} onClick={() => setDownloadIds(pendingPhotos.map(p => p.id))}><Icon name="download" size={16} />다운로드 기록 {pendingPhotos.length > 0 && <span>{pendingPhotos.length}</span>}</button></div>

@@ -58,3 +58,20 @@ export async function hashBlob(blob: Blob): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
+
+export function defaultAlbumName(date = new Date()): string {
+  const year = String(date.getFullYear()).slice(-2).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}${month}${day} 여행`;
+}
+
+export function mergeUploadedPhoto(photos: Photo[], incoming: Photo): Photo[] {
+  const previous = photos.find(photo => photo.id === incoming.id);
+  const updated = previous ? {
+    ...previous, ...incoming,
+    contributors: [...new Set([...previous.contributors, ...incoming.contributors])],
+    importCount: Math.max(previous.importCount ?? previous.contributors.length, incoming.importCount ?? incoming.contributors.length),
+  } : incoming;
+  return [updated, ...photos.filter(photo => photo.id !== incoming.id)].sort((a, b) => b.createdAt - a.createdAt);
+}

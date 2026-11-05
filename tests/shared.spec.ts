@@ -423,13 +423,26 @@ test('a partially failed shared upload shows committed photos and retries only t
   await page.getByRole('dialog', { name: '공유보관함 관리' }).getByRole('button', { name: '만들기', exact: true }).click();
   const albumId = await page.getByLabel('공유보관함 선택', { exact: true }).inputValue();
   let attempts = 0;
+  let failedOnce = false;
+  let committed!: () => void;
+  const committedResponse = new Promise<void>(resolve => { committed = resolve; });
   await page.route(`${apiBase}/op/phogaem-photo-upload/v1?*`, async route => {
-    if (++attempts === 2) await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'synthetic interrupted upload' }) });
-    else await route.continue();
+    attempts += 1;
+    const name = new URL(route.request().url()).searchParams.get('name');
+    if (name === 'retry.png' && !failedOnce) {
+      failedOnce = true;
+      await committedResponse;
+      await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'synthetic interrupted upload' }) });
+    } else {
+      const response = await route.fetch();
+      expect(response.status()).toBe(200);
+      await route.fulfill({ response });
+      if (name === 'committed.png') committed();
+    }
   });
   await page.getByLabel('사진 파일 선택').setInputFiles([
-    { name: 'committed.png', mimeType: 'image/png', buffer: Buffer.from(imageBytes) },
     { name: 'retry.png', mimeType: 'image/png', buffer: Buffer.concat([Buffer.from(imageBytes), Buffer.from('second synthetic original')]) },
+    { name: 'committed.png', mimeType: 'image/png', buffer: Buffer.from(imageBytes) },
   ]);
   await expect(page.getByRole('group', { name: '작업 실패' })).toBeVisible();
   await expect(page.locator('article.photo-card')).toHaveCount(1);
@@ -443,4 +456,114 @@ test('a partially failed shared upload shows committed photos and retries only t
   expect(attempts).toBe(3);
   const final = await client<{ photos: Array<{ name: string; importCount: number }> }>(page, 'get', { albumId });
   expect(final.photos.map(photo => photo.importCount)).toEqual([1, 1]);
+});
+
+test('new libraries default to the browser-local yymmdd travel date', async ({ browser }) => {
+  const context = await browser.newContext({ timezoneId: 'Asia/Seoul' });
+  try {
+    const page = await context.newPage();
+    // UTC is still January 1: the product default must use the user's January 2.
+    await page.clock.setFixedTime(new Date('2026-01-01T15:30:00Z'));
+    await page.goto('./');
+    await connectApprovedUi(page);
+    await expect(page.getByLabel('보관함 이름', { exact: true })).toHaveValue('260102 여행');
+  } finally {
+    await context.close();
+  }
+});
+
+test('parallel completions update photos and the remaining queue before the batch finishes', async ({ page }) => {
+  await page.goto('./');
+  await connectApprovedUi(page);
+  await page.getByLabel('보관함 이름', { exact: true }).fill('병렬 완료 여행');
+  await page.getByRole('dialog', { name: '공유보관함 관리' }).getByRole('button', { name: '만들기', exact: true }).click();
+  await expect(page.getByLabel('공유보관함 선택', { exact: true })).toBeVisible();
+  let releaseFirst!: () => void;
+  let releaseThird!: () => void;
+  let releaseOldDuplicate!: () => void;
+  let releaseFinalMetadata!: () => void;
+  const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+  const thirdGate = new Promise<void>(resolve => { releaseThird = resolve; });
+  const oldDuplicateGate = new Promise<void>(resolve => { releaseOldDuplicate = resolve; });
+  const finalMetadataGate = new Promise<void>(resolve => { releaseFinalMetadata = resolve; });
+  let holdFinalMetadata = false;
+  let finalMetadataHeld = false;
+  let oldDuplicateCommitted = false;
+  let firstCommitted = false;
+  let thirdCommitted = false;
+  let albumReads = 0;
+  page.on('request', request => {
+    if (new URL(request.url()).pathname === '/op/phogaem-album-get/v1') albumReads += 1;
+  });
+  await page.route(`${apiBase}/op/phogaem-photo-upload/v1?*`, async route => {
+    const name = new URL(route.request().url()).searchParams.get('name');
+    if (name === 'slow-first.png' || name === 'held-third.png' || name === 'old-duplicate.png') {
+      // Commit against the real sidecar, then delay only the browser's response.
+      const response = await route.fetch();
+      expect(response.status()).toBe(200);
+      if (name === 'slow-first.png') { firstCommitted = true; await firstGate; }
+      else if (name === 'held-third.png') { thirdCommitted = true; await thirdGate; }
+      else { oldDuplicateCommitted = true; await oldDuplicateGate; }
+      await route.fulfill({ response });
+    } else await route.continue();
+  });
+  await page.route(`${apiBase}/op/phogaem-album-get/v1?*`, async route => {
+    if (holdFinalMetadata) { finalMetadataHeld = true; await finalMetadataGate; }
+    await route.continue();
+  });
+  const fastBytes = Buffer.concat([Buffer.from(imageBytes), Buffer.from('fast synthetic original')]);
+  try {
+    await page.getByLabel('사진 파일 선택').setInputFiles([
+      { name: 'slow-first.png', mimeType: 'image/png', buffer: Buffer.from(imageBytes) },
+      { name: 'fast-second.png', mimeType: 'image/png', buffer: fastBytes },
+    ]);
+    await expect.poll(() => firstCommitted).toBe(true);
+    const fastCard = page.locator('article.photo-card').filter({ hasText: 'fast-second.png' });
+    await expect(fastCard).toHaveCount(1);
+    await expect(page.locator('article.photo-card')).toHaveCount(1);
+    await expect(page.getByRole('main')).toHaveAttribute('aria-busy', 'true');
+    const queue = page.getByRole('region', { name: '업로드 파일' });
+    await expect(queue).toContainText('slow-first.png');
+    await expect(queue).not.toContainText('fast-second.png');
+    expect(albumReads).toBe(0);
+    releaseFirst();
+    await expect(page.locator('article.photo-card')).toHaveCount(2);
+    await expect(page.getByRole('main')).toHaveAttribute('aria-busy', 'false');
+    await expect(queue).toHaveCount(0);
+
+    await page.getByLabel('사진 파일 선택').setInputFiles([
+      { name: 'fast-renamed-duplicate.png', mimeType: 'image/png', buffer: fastBytes },
+      { name: 'held-third.png', mimeType: 'image/png', buffer: Buffer.concat([Buffer.from(imageBytes), Buffer.from('third synthetic original')]) },
+    ]);
+    await expect.poll(() => thirdCommitted).toBe(true);
+    await expect(fastCard.getByLabel('중복 2', { exact: true })).toBeVisible();
+    await expect(page.locator('article.photo-card')).toHaveCount(2);
+    await expect(page.getByRole('main')).toHaveAttribute('aria-busy', 'true');
+    await expect(queue).toContainText('held-third.png');
+    await expect(queue).not.toContainText('fast-renamed-duplicate.png');
+    releaseThird();
+    await expect(page.locator('article.photo-card')).toHaveCount(3);
+    await expect(page.getByRole('main')).toHaveAttribute('aria-busy', 'false');
+    await expect(queue).toHaveCount(0);
+
+    // Two duplicate commits also return snapshots: a late older snapshot must not
+    // overwrite the newer import count while the final metadata refresh is pending.
+    holdFinalMetadata = true;
+    await page.getByLabel('사진 파일 선택').setInputFiles([
+      { name: 'old-duplicate.png', mimeType: 'image/png', buffer: fastBytes },
+      { name: 'new-duplicate.png', mimeType: 'image/png', buffer: fastBytes },
+    ]);
+    await expect.poll(() => oldDuplicateCommitted).toBe(true);
+    await expect(fastCard.getByLabel('중복 4', { exact: true })).toBeVisible();
+    releaseOldDuplicate();
+    await expect.poll(() => finalMetadataHeld).toBe(true);
+    await expect(fastCard.getByLabel('중복 4', { exact: true })).toBeVisible();
+    releaseFinalMetadata();
+    await expect(page.getByRole('main')).toHaveAttribute('aria-busy', 'false');
+  } finally {
+    releaseFirst();
+    releaseThird();
+    releaseOldDuplicate();
+    releaseFinalMetadata();
+  }
 });

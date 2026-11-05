@@ -94,31 +94,87 @@ export function validateSharedFiles(files: File[]): void {
   }
 }
 
-export async function uploadSharedPhotos(albumId: string, files: File[], onProgress?: (completed: number) => void): Promise<{ added: number; duplicates: number }> {
-  // Validate the entire batch before making requests. Uploads themselves commit per original.
+export interface UploadProgress {
+  photo: RemotePhoto;
+  index: number;
+  completedIndices: number[];
+}
+
+const uploadFailureIndices = new WeakMap<object, number>();
+export function getUploadFailureIndex(error: unknown): number | undefined {
+  return error !== null && typeof error === 'object' ? uploadFailureIndices.get(error) : undefined;
+}
+
+interface UploadTask { run: () => Promise<void>; cancelled: () => boolean; resolve: () => void; reject: (error: unknown) => void }
+// Originals and uploads share a transfer start budget, reserving gateway headroom for metadata.
+let nextTransferStart = 0;
+const uploadQueue: UploadTask[] = [];
+let activeUploads = 0;
+let nextUploadStart = 0;
+let uploadTimer: ReturnType<typeof setTimeout> | undefined;
+
+function pumpUploads(): void {
+  if (uploadTimer !== undefined) return;
+  while (uploadQueue[0]?.cancelled()) uploadQueue.shift()!.resolve();
+  if (activeUploads >= 2 || !uploadQueue.length) return;
+  const wait = Math.max(0, Math.max(nextUploadStart, nextTransferStart) - Date.now());
+  if (wait) {
+    uploadTimer = setTimeout(() => { uploadTimer = undefined; pumpUploads(); }, wait);
+    return;
+  }
+  const task = uploadQueue.shift()!;
+  activeUploads += 1;
+  nextUploadStart = Date.now() + 350;
+  nextTransferStart = Date.now() + 250;
+  task.run().then(task.resolve, task.reject).finally(() => { activeUploads -= 1; pumpUploads(); });
+  pumpUploads();
+}
+
+function queuedUpload(run: () => Promise<void>, cancelled: () => boolean): Promise<void> {
+  return new Promise((resolve, reject) => { uploadQueue.push({ run, cancelled, resolve, reject }); pumpUploads(); });
+}
+
+export async function uploadSharedPhotos(albumId: string, files: File[], onProgress?: (completed: number, event: UploadProgress) => void, onFailure?: (error: unknown, index: number) => void): Promise<{ added: number; duplicates: number }> {
+  // Reject an invalid batch before scheduling any writes. Each successful file is committed
+  // independently; out-of-order completions report their actual indices, never a prefix.
   validateSharedFiles(files);
   let added = 0;
   let duplicates = 0;
-  for (const file of files) {
+  const completedIndices = new Set<number>();
+  const failures: Array<{ error: unknown; index: number }> = [];
+  await Promise.allSettled(files.map((file, index) => queuedUpload(async () => {
     try {
       const response = await server.op('phogaem-photo-upload', {
         version: 'v1', method: 'POST', query: { albumId, name: file.name },
         headers: { 'content-type': fileType(file) }, body: file,
       });
-      const result = await (await checked(response)).json() as { added: boolean };
+      const result = await (await checked(response)).json() as { added: boolean; photo: RemotePhoto };
       if (result.added) added += 1;
       else duplicates += 1;
-      onProgress?.(added + duplicates);
+      completedIndices.add(index);
+      onProgress?.(added + duplicates, { photo: result.photo, index, completedIndices: [...completedIndices].sort((a, b) => a - b) });
     } catch (error) {
-      if (added + duplicates) {
-        const message = error instanceof Error ? error.message : '업로드를 완료하지 못했어요.';
-        const partial = `${added}장 추가 · 중복 ${duplicates}장 처리 후 중단됐어요. 새로고침해 결과를 확인해 주세요. ${message}`;
-        // Preserve approval failures so the UI clears protected content after revocation.
-        if (error instanceof ServerError) { error.message = partial; throw error; }
-        throw new Error(partial, { cause: error });
-      }
+      // Mark the batch before releasing its queue slot so no new file starts after denial.
+      failures.push({ error, index });
+      // Notify denial immediately while already-started writes still drain. Observer failures
+      // must never replace the server error or reopen the stopped queue.
+      try { onFailure?.(error, index); } catch { /* observation must not affect upload state */ }
       throw error;
     }
+  }, () => failures.length > 0)));
+  // In-flight writes may already have committed. Drain all of them before returning or
+  // throwing so callers can safely retain only uncommitted files and clear revoked access.
+  const failure = failures.find(item => item.error instanceof ApprovalRequired) ?? failures[0];
+  if (failure) {
+    let error = failure.error;
+    if (added + duplicates) {
+      const message = error instanceof Error ? error.message : '업로드를 완료하지 못했어요.';
+      const partial = `${added}장 추가 · 중복 ${duplicates}장 처리 후 중단됐어요. 새로고침해 결과를 확인해 주세요. ${message}`;
+      if (error instanceof ServerError) error.message = partial;
+      else error = new Error(partial, { cause: error });
+    }
+    if (error !== null && typeof error === 'object') uploadFailureIndices.set(error, failure.index);
+    throw error;
   }
   return { added, duplicates };
 }
@@ -131,7 +187,7 @@ let originalTimer: ReturnType<typeof setTimeout> | undefined;
 
 function pumpOriginalQueue(): void {
   if (originalTimer !== undefined || activeOriginals >= 2 || !originalQueue.length) return;
-  const wait = Math.max(0, nextOriginalStart - Date.now());
+  const wait = Math.max(0, Math.max(nextOriginalStart, nextTransferStart) - Date.now());
   if (wait) {
     originalTimer = setTimeout(() => { originalTimer = undefined; pumpOriginalQueue(); }, wait);
     return;
@@ -139,6 +195,7 @@ function pumpOriginalQueue(): void {
   const task = originalQueue.shift()!;
   activeOriginals += 1;
   nextOriginalStart = Date.now() + 350;
+  nextTransferStart = Date.now() + 250;
   task.run().then(task.resolve, task.reject).finally(() => { activeOriginals -= 1; pumpOriginalQueue(); });
   pumpOriginalQueue();
 }
