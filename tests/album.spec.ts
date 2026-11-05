@@ -197,3 +197,56 @@ test('desktop 1920px shows the full album and produces a review screenshot', asy
   await expect(cards(page).first().getByRole('img')).toBeVisible();
   await page.screenshot({ path: 'test-results/phogaem-desktop.png', fullPage: true });
 });
+
+for (const outcome of ['success', 'failure'] as const) {
+  test(`invite connection waits for initial local storage ${outcome}`, async ({ page }) => {
+    await seed(page);
+    const authRequests: string[] = [];
+    page.on('request', request => {
+      if (new URL(request.url()).pathname.startsWith('/auth/')) authRequests.push(request.url());
+    });
+    await page.addInitScript(() => {
+      Reflect.set(window, '__releaseInitialRead', undefined);
+      Reflect.set(window, '__initialReadGate', new Promise<void>(resolve => {
+        Reflect.set(window, '__releaseInitialRead', resolve);
+      }));
+    });
+    await page.route('**/src/storage.ts*', async route => {
+      const response = await route.fetch();
+      const body = await response.text();
+      const signature = 'export async function loadPhotos() {';
+      expect(body).toContain(signature);
+      await route.fulfill({ response, body: body.replace(signature,
+        `${signature}\nawait window.__initialReadGate;\n${outcome === 'failure' ? 'throw new Error("synthetic unavailable storage");' : ''}`) });
+    });
+    await page.goto('./#invite=synthetic-invitation');
+    await page.reload();
+    const manager = page.getByRole('dialog', { name: '공유보관함 관리' });
+    await expect(manager).toBeVisible();
+    await expect(manager.getByRole('button', { name: '이 기기로 연결', exact: true })).toBeDisabled();
+    await expect(manager.getByRole('button', { name: '패스키로 기존 계정 연결' })).toBeDisabled();
+    expect(authRequests).toEqual([]);
+    await page.evaluate(() => Reflect.get(window, '__releaseInitialRead')());
+    await expect(manager.getByRole('button', { name: '이 기기로 연결', exact: true })).toBeEnabled();
+    if (outcome === 'success') await expect(cards(page)).toHaveCount(12);
+    else {
+      await expect(manager.getByRole('alert')).toContainText('보관함을 열지 못했어요');
+      await expect(cards(page)).toHaveCount(0);
+    }
+    expect(authRequests).toEqual([]);
+  });
+}
+
+test('local upload rejects MIME disguises and accepts camera files with unspecified MIME', async ({ page }) => {
+  await open(page);
+  await page.getByLabel('사진 파일 선택').setInputFiles({
+    name: 'disguised.jpg', mimeType: 'text/html', buffer: Buffer.from('<script>throw new Error("not a photo")</script>'),
+  });
+  await expect(page.getByRole('alert')).toContainText('지원하는 사진');
+  await expect(cards(page)).toHaveCount(0);
+  await upload(page, 'camera.HEIC', Buffer.from('synthetic HEIC original'), '');
+  await upload(page, 'camera.png', pixel, 'application/octet-stream');
+  await expect(cards(page)).toHaveCount(2);
+  await page.reload();
+  await expect(cards(page)).toHaveCount(2);
+});

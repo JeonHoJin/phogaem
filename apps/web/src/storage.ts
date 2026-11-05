@@ -49,7 +49,10 @@ function validateFile(file: File): void {
   if (/svg/i.test(file.type) || /\.svgz?$/i.test(file.name)) throw new Error(`${file.name}: SVG 파일은 업로드할 수 없습니다.`);
   const allowedType = /^image\/(jpeg|png|webp|gif|avif|heic|heif|heic-sequence|heif-sequence)$/i.test(file.type);
   const allowedExtension = /\.(jpe?g|png|webp|gif|avif|heic|heif)$/i.test(file.name);
-  if (!allowedType && !allowedExtension) throw new Error(`${file.name}: 지원하는 사진 파일을 선택해 주세요.`);
+  // Empty/generic MIME is common for camera formats, but explicit non-image types
+  // and non-photo download extensions must not be disguised by the other field.
+  const unspecifiedType = !file.type || file.type.toLowerCase() === 'application/octet-stream';
+  if (!allowedExtension || (!allowedType && !unspecifiedType)) throw new Error(`${file.name}: 지원하는 사진 파일을 선택해 주세요.`);
 }
 
 export async function importPhotos(files: File[], member: MemberId): Promise<{ added: number; duplicates: number; photos: Photo[] }> {

@@ -180,7 +180,8 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
-    loadPhotos().then(value => { if (active) setPhotos(value); }).catch(() => { if (active) setError('보관함을 열지 못했어요. 브라우저의 사이트 저장소 허용 여부를 확인해 주세요.'); }).finally(() => { if (active) setLoading(false); });
+    const epoch = sourceEpoch.current;
+    loadPhotos().then(value => { if (active && epoch === sourceEpoch.current) setPhotos(value); }).catch(() => { if (active && epoch === sourceEpoch.current) setError('보관함을 열지 못했어요. 브라우저의 사이트 저장소 허용 여부를 확인해 주세요.'); }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, []);
   useEffect(() => {
@@ -198,9 +199,10 @@ export default function App() {
     setNotice(''); setError(reason.message); setManagerOpen(true);
   }, []);
 
-  async function mutate(action: () => Promise<Photo[]>, success?: string) {
+  async function mutate(action: () => Promise<Photo[]>, success?: string, changesSource = false) {
     if (operation.current) return;
     operation.current = true; setBusy(true); setError('');
+    if (changesSource) sourceEpoch.current += 1;
     const epoch = sourceEpoch.current;
     try {
       const next = await action();
@@ -220,6 +222,7 @@ export default function App() {
           const result = await sharedApi.uploadSharedPhotos(remote.album.id, files);
           setNotice(`${result.added}장 추가 · 중복 ${result.duplicates}장`);
         } catch (reason) {
+          if (reason instanceof ApprovalRequired) throw reason;
           // Uploads commit per file: reflect successful earlier files even on a later failure.
           try { await refreshAlbum(remote.album.id); } catch (refreshError) { if (refreshError instanceof ApprovalRequired) throw refreshError; }
           throw reason;
@@ -268,6 +271,7 @@ export default function App() {
     setSelected(new Set()); setViewerId(null); setDownloadIds(null); setInviteLink(''); setNotice('');
   }
   async function connectShared(passkey = false) {
+    if (loading) return;
     await mutate(async () => {
       if (passkey) await signInWithPasskey();
       const result = await sharedApi.listAlbums();
@@ -275,7 +279,7 @@ export default function App() {
       setRemote({ ...result, album: null, members: [] });
       clearTransient();
       return [];
-    }, '연결했어요. 보관함을 만들거나 초대 코드로 참여해 주세요.');
+    }, '연결했어요. 보관함을 만들거나 초대 코드로 참여해 주세요.', true);
   }
   async function selectAlbum(id: string) {
     if (!id) return;
@@ -320,7 +324,7 @@ export default function App() {
       const local = await loadPhotos();
       setRemote(null); setApprovalCode(null); clearTransient(); setManagerOpen(false);
       return local;
-    });
+    }, undefined, true);
   }
 
   return <ApprovalContext.Provider value={approvalDenied}><div className="app-shell" onDragOver={event => { event.preventDefault(); if (event.dataTransfer.types.includes('Files')) setDragging(true); }}>
@@ -359,8 +363,8 @@ export default function App() {
       {error && <p className="message error" role="alert">{error}</p>}
       {!remote ? <div className="connect-actions">
         {approvalCode !== null && <section className="approval-pending" aria-label="계정 승인 대기"><h3>승인 대기 중</h3><p>관리자가 이 계정을 승인하면 공유보관함을 사용할 수 있어요.</p><label>계정 코드<output aria-label="계정 코드">{approvalCode || '확인할 수 없음'}</output></label><small>이미 다른 웹앱에서 승인받았다면 아래 패스키로 기존 계정에 연결해 주세요. 초대 링크만으로 계정 승인을 대신할 수는 없어요.</small></section>}
-        <button className="button primary" disabled={busy || !passkeySupported()} onClick={() => void connectShared(true)}>패스키로 기존 계정 연결</button>
-        <button className="button secondary" disabled={busy} onClick={() => void connectShared()}>{approvalCode === null ? '이 기기로 연결' : '승인 상태 다시 확인'}</button>
+        <button className="button primary" disabled={busy || loading || !passkeySupported()} onClick={() => void connectShared(true)}>패스키로 기존 계정 연결</button>
+        <button className="button secondary" disabled={busy || loading} onClick={() => void connectShared()}>{approvalCode === null ? '이 기기로 연결' : '승인 상태 다시 확인'}</button>
         {approvalCode !== null && <><button className="button secondary" disabled={busy || !passkeySupported()} onClick={() => void mutate(async () => { await registerPasskey(); return []; }, '패스키를 등록했어요. 관리자 승인 후 같은 계정으로 연결할 수 있어요.')}>기기 연결용 패스키 등록</button><button className="text-button" disabled={busy} onClick={() => void returnLocal()}>이 기기 보관함으로</button></>}
         <small>기존 계정의 패스키와 승인은 같은 mlhops 서버·사이트를 쓰는 앱에서 공유돼요. ‘이 기기로 연결’로 새로 만든 계정은 별도 승인이 필요해요.</small>
       </div> : <>

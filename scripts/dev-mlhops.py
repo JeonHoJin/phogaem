@@ -139,7 +139,7 @@ class Stack:
             time.sleep(0.1)
         raise RuntimeError(f"Timed out waiting for {url}; inspect {self.work}/*.log")
 
-    def services(self) -> str:
+    def services(self, web_port: int = 5174) -> str:
         self.run([executable("cargo"), "build", "--locked", "-p", "mlhops-core", "-p", "mlhops-gateway", "-p", "mlhops-sidecar-phogaem"], name="cargo-build", cwd=MLHOPS)
         ports: set[int] = set()
         while len(ports) < 5:
@@ -153,7 +153,7 @@ class Stack:
             **shared, "MLHOPS_CORE_API_ADDR": f"127.0.0.1:{core}",
             "MLHOPS_CORE_REGISTRY_ADDR": f"127.0.0.1:{registry}",
             "MLHOPS_JWT_KEY_FILE": str(self.work / "jwt.key"), "MLHOPS_DATABASE_SCHEMA": "dev_core",
-            "MLHOPS_PASSKEY_RP_ID": "localhost", "MLHOPS_PASSKEY_ORIGINS": "http://localhost:5174",
+            "MLHOPS_PASSKEY_RP_ID": "localhost", "MLHOPS_PASSKEY_ORIGINS": f"http://localhost:{web_port}",
             "MLHOPS_HEARTBEAT_TTL_SECS": "15",
             "MLHOPS_CORE_ADMIN_ADDR": f"127.0.0.1:{admin}",
             "MLHOPS_BACKUP_DIR": str(self.work / "backups"),
@@ -167,7 +167,7 @@ class Stack:
         self.wait_http(f"http://127.0.0.1:{core}/healthz", lambda data: data.get("operations", 0) >= 8)
         self.spawn("mlhops-gateway", {
             "MLHOPS_GATEWAY_ADDR": f"127.0.0.1:{gateway}", "MLHOPS_CORE_URL": f"http://127.0.0.1:{core}",
-            "MLHOPS_ALLOWED_ORIGINS": "http://127.0.0.1:5173,http://127.0.0.1:5174,http://localhost:5174",
+            "MLHOPS_ALLOWED_ORIGINS": f"http://127.0.0.1:5173,http://127.0.0.1:{web_port},http://localhost:{web_port}",
             "MLHOPS_MAX_BODY_MB": "20", "MLHOPS_RATE_PER_SEC": "1000", "MLHOPS_RATE_BURST": "1000",
         })
         api = f"http://127.0.0.1:{gateway}"
@@ -222,9 +222,10 @@ def main() -> int:
             print("Database ready. Ctrl-C stops this disposable cluster.", flush=True)
             while True:
                 time.sleep(1)
-        api = stack.services()
+        web_port = free_port() if args.test else 5174
+        api = stack.services(web_port)
         if args.test:
-            env = {**stack.env, "PHOGAEM_INTEGRATION_API_BASE": api, "PHOGAEM_INTEGRATION_ADMIN_BASE": stack.admin_base or "", "VITE_MLHOPS_API_BASE": api}
+            env = {**stack.env, "PHOGAEM_INTEGRATION_API_BASE": api, "PHOGAEM_INTEGRATION_ADMIN_BASE": stack.admin_base or "", "VITE_MLHOPS_API_BASE": api, "PHOGAEM_TEST_WEB_PORT": str(web_port)}
             process = subprocess.Popen([executable("npx"), "playwright", "test", "--config", "playwright.shared.config.ts"], cwd=ROOT, env=env, start_new_session=True)
             stack.children.append(process)
             return process.wait()

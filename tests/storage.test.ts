@@ -37,3 +37,17 @@ test('preferences are namespaced, validated and tolerate unavailable storage', (
     else Reflect.deleteProperty(globalThis, 'localStorage');
   }
 });
+
+
+test('photo extensions cannot disguise active MIME and image MIME cannot disguise download extensions', async () => {
+  for (const [name, type] of [
+    ['photo.jpg', 'text/html'],
+    ['photo.png', 'application/xhtml+xml'],
+    ['photo.jpg', 'text/javascript'],
+    ['photo.html', 'image/png'],
+    ['photo.jpg.exe', 'image/jpeg'],
+    ['photo', 'image/jpeg'],
+  ]) {
+    await assert.rejects(importPhotos([new File(['synthetic bytes'], name, { type })], 'me'), /지원하는 사진/);
+  }
+});

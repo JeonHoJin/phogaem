@@ -11,14 +11,15 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint apps/web/src tests vite.config.ts playwright.config.ts playwright.shared.config.ts",
+    "lint": "eslint apps/web/src tests vite.config.ts playwright.config.ts playwright.shared.config.ts playwright.production.config.ts",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "test:e2e": "playwright test",
     "test:shared": "python3 scripts/dev-mlhops.py --test",
     "dev:server": "python3 scripts/dev-mlhops.py",
     "test:vision": "python3 -m unittest discover -s tests -p test_vision_probe.py -v",
     "probe:fixtures": "node scripts/generate-vision-fixtures.mjs",
-    "probe:vision": "python3 scripts/vision-probe.py --fixtures .local/gemma-vision/fixtures/manifest.json --limit-pairs 5"
+    "probe:vision": "python3 scripts/vision-probe.py --fixtures .local/gemma-vision/fixtures/manifest.json --limit-pairs 5",
+    "test:production": "playwright test --config playwright.production.config.ts"
   },
   "dependencies": {
     "react": "^19.3.1",

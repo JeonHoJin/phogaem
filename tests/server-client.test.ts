@@ -303,3 +303,130 @@ test('only the core approval-required error is treated as pending account approv
     assert.equal(pending.accountCode, 'a1b2c3d4');
   } finally { server.op = originalOp; }
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+test('all transports omit cookies, referrers and caches and refuse redirects', async () => {
+  const transport = mockTransport(() => Response.json({}, { status: 201 }));
+  const client = new ServerClient({ base: 'https://example.test/', store: memoryKeys().store, fetch: transport.fetch });
+  await client.op('phogaem-albums', { method: 'GET' });
+  await client.postPublic('/auth/passkey/login/options');
+  await client.adoptAccount({ access_token: 'passkey-token', expires_in: 600, user_id: 'recovered' });
+  for (const { init } of transport.calls) {
+    assert.equal(init.redirect, 'error');
+    assert.equal(init.credentials, 'omit');
+    assert.equal(init.cache, 'no-store');
+    assert.equal(init.referrerPolicy, 'no-referrer');
+  }
+});
+
+test('a real 307 redirect never forwards an authentication body to its target', async () => {
+  const { createServer } = await import('node:http');
+  let forwarded = 0;
+  const http = createServer((request, response) => {
+    if (request.url === '/auth/token') { response.writeHead(307, { location: '/untrusted-target' }); response.end(); }
+    else { forwarded += 1; response.end('{}'); }
+  });
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  try {
+    const address = http.address();
+    assert.ok(address && typeof address === 'object');
+    const client = new ServerClient({ base: `http://127.0.0.1:${address.port}`, store: memoryKeys().store });
+    await assert.rejects(client.postPublic('/auth/token', { signature: 'synthetic-proof' }), ServerError);
+    assert.equal(forwarded, 0);
+  } finally {
+    http.closeAllConnections();
+    await new Promise<void>((resolve, reject) => http.close(error => error ? reject(error) : resolve()));
+  }
+});
+
+test('invalid credential destinations and operation names fail before identity creation', async () => {
+  const keys = memoryKeys();
+  const transport = mockTransport();
+  for (const base of ['http://example.test', 'https://user:pass@example.test', 'https://example.test/path']) {
+    assert.throws(() => new ServerClient({ base, store: keys.store, fetch: transport.fetch }));
+  }
+  const client = new ServerClient({ base: 'https://example.test', store: keys.store, fetch: transport.fetch });
+  for (const path of ['@evil.test/collect', '//evil.test/collect', '/\\evil.test/collect', '/auth/token\n', '/auth/token#fragment']) {
+    await assert.rejects(client.request(path), ServerError);
+    await assert.rejects(client.postPublic(path, { secret: 'synthetic' }), ServerError);
+  }
+  await assert.rejects(client.op('../auth/token'), ServerError);
+  await assert.rejects(client.op('phogaem-albums', { version: '../token' }), ServerError);
+  assert.equal(keys.writes, 0);
+  assert.equal(transport.calls.length, 0);
+});
+
+test('reset invalidates a pending sign-in without allowing it to restore the session', async () => {
+  const held = deferred<Response>();
+  const arrived = deferred<void>();
+  const transport = mockTransport();
+  const client = new ServerClient({ base: 'https://example.test', store: memoryKeys().store, fetch: async (input, init) => {
+    const response = await transport.fetch(input, init);
+    if (String(input).endsWith('/auth/token') && transport.tokens === 1) { arrived.resolve(); return held.promise; }
+    return response;
+  } });
+  const stale = client.token();
+  const rejected = assert.rejects(stale, /로그인 상태가 변경/);
+  await arrived.promise;
+  client.resetSession();
+  assert.equal(await client.token(), 'token-2');
+  held.resolve(Response.json({ access_token: 'old-token', expires_in: 600, user_id: 'old-user' }));
+  await rejected;
+  assert.equal(await client.token(), 'token-2');
+  assert.equal(client.userId, 'user-one');
+});
+
+test('an old in-flight sign-in cannot replace an adopted passkey account', async () => {
+  const held = deferred<Response>();
+  const arrived = deferred<void>();
+  const transport = mockTransport(() => Response.json({}, { status: 201 }));
+  const client = new ServerClient({ base: 'https://example.test', store: memoryKeys().store, fetch: async (input, init) => {
+    const response = await transport.fetch(input, init);
+    if (String(input).endsWith('/auth/token')) { arrived.resolve(); return held.promise; }
+    return response;
+  } });
+  const stale = client.token();
+  const rejected = assert.rejects(stale, /로그인 상태가 변경/);
+  await arrived.promise;
+  await client.adoptAccount({ access_token: 'recovered-token', expires_in: 600, user_id: 'recovered-user' });
+  held.resolve(Response.json({ access_token: 'old-token', expires_in: 600, user_id: 'old-user' }));
+  await rejected;
+  assert.equal(client.userId, 'recovered-user');
+  assert.equal(await client.token(), 'recovered-token');
+});
+
+test('a delayed response from the previous account cannot refresh or be returned under the new account', async () => {
+  for (const status of [200, 401]) {
+    const held = deferred<Response>();
+    const arrived = deferred<void>();
+    const transport = mockTransport(url => {
+      if (url.pathname.startsWith('/op/')) { arrived.resolve(); return held.promise; }
+      return Response.json({}, { status: 201 });
+    });
+    const client = new ServerClient({ base: 'https://example.test', store: memoryKeys().store, fetch: transport.fetch });
+    const stale = client.op('phogaem-albums', { method: 'GET' });
+    const rejected = assert.rejects(stale, /로그인 상태가 변경/);
+    await arrived.promise;
+    await client.adoptAccount({ access_token: 'recovered-token', expires_in: 600, user_id: 'recovered-user' });
+    held.resolve(Response.json({ privateAlbum: 'old-account' }, { status }));
+    await rejected;
+    assert.equal(client.userId, 'recovered-user');
+    assert.equal(await client.token(), 'recovered-token');
+    assert.equal(transport.tokens, 1, 'the stale 401 must not reset or refresh the adopted session');
+  }
+});
+
+test('mid-batch approval revocation retains the typed failure needed to clear protected UI', async () => {
+  const originalOp = server.op;
+  let uploads = 0;
+  server.op = async () => ++uploads === 1 ? Response.json({ added: true }) : Response.json({ error: 'approval required' }, { status: 403 });
+  try {
+    await assert.rejects(uploadSharedPhotos('album', [new File(['one'], 'one.png'), new File(['two'], 'two.png')]),
+      (error: unknown) => error instanceof ApprovalRequired && /1장 추가/.test(error.message));
+  } finally { server.op = originalOp; }
+});

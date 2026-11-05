@@ -111,7 +111,10 @@ export async function uploadSharedPhotos(albumId: string, files: File[]): Promis
     } catch (error) {
       if (added + duplicates) {
         const message = error instanceof Error ? error.message : '업로드를 완료하지 못했어요.';
-        throw new Error(`${added}장 추가 · 중복 ${duplicates}장 처리 후 중단됐어요. 새로고침해 결과를 확인해 주세요. ${message}`, { cause: error });
+        const partial = `${added}장 추가 · 중복 ${duplicates}장 처리 후 중단됐어요. 새로고침해 결과를 확인해 주세요. ${message}`;
+        // Preserve approval failures so the UI clears protected content after revocation.
+        if (error instanceof ServerError) { error.message = partial; throw error; }
+        throw new Error(partial, { cause: error });
       }
       throw error;
     }

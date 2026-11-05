@@ -1,3 +1,5 @@
+import { validateApiBase } from './config.ts'
+
 // Adapted from schedule-parser/apps/mobile/src/server/client.ts (mlhops device-key contract).
 /**
  * mlhops 서버 클라이언트: 기기 키 로그인 + op 호출.
@@ -55,6 +57,9 @@ export function base64url(bytes: ArrayBuffer | Uint8Array): string {
 export class ServerClient {
   private session?: Session
   private pending?: Promise<Session>
+  private pendingKeys?: Promise<CryptoKeyPair>
+  private adopting?: Promise<void>
+  private generation = 0
   private readonly fetch: typeof fetch
   private readonly subtle: SubtleCrypto
   private readonly now: () => number
@@ -62,7 +67,7 @@ export class ServerClient {
   private readonly opts: ClientOptions
 
   constructor(opts: ClientOptions) {
-    this.opts = opts
+    this.opts = { ...opts, base: validateApiBase(opts.base) }
     this.fetch = opts.fetch ?? globalThis.fetch.bind(globalThis)
     this.subtle = opts.subtle ?? globalThis.crypto.subtle
     this.now = opts.now ?? Date.now
@@ -77,7 +82,12 @@ export class ServerClient {
     return Boolean(await this.opts.store.get())
   }
 
-  private async deviceKeys(): Promise<CryptoKeyPair> {
+  private deviceKeys(): Promise<CryptoKeyPair> {
+    this.pendingKeys ??= this.loadDeviceKeys().finally(() => { this.pendingKeys = undefined })
+    return this.pendingKeys
+  }
+
+  private async loadDeviceKeys(): Promise<CryptoKeyPair> {
     const existing = await this.opts.store.get()
     if (existing) return existing
     // extractable=false: 개인키는 이 브라우저 밖으로 내보낼 수 없다
@@ -88,12 +98,33 @@ export class ServerClient {
 
   /** Clears the in-memory token only; the device key remains this device's identity. */
   resetSession(): void {
+    this.generation += 1
     this.session = undefined
+    this.pending = undefined
+  }
+
+  private checkGeneration(generation: number): void {
+    if (generation !== this.generation) throw new ServerError(0, '로그인 상태가 변경됐어요. 다시 연결해 주세요.')
+  }
+
+  private requestUrl(path: string): string {
+    // Never turn a caller-controlled path into another credential destination.
+    if (!path.startsWith('/') || path.startsWith('//') || [...path].some(char => char === '\\' || char === '#' || char.charCodeAt(0) <= 32 || char.charCodeAt(0) === 127)) {
+      throw new ServerError(0, '올바르지 않은 서버 요청 경로예요.')
+    }
+    const url = new URL(path, this.opts.base)
+    if (url.origin !== this.opts.base) throw new ServerError(0, '올바르지 않은 서버 요청 경로예요.')
+    return url.href
   }
 
   private async send(path: string, init: RequestInit): Promise<Response> {
+    const url = this.requestUrl(path)
     try {
-      return await this.fetch(this.opts.base + path, init)
+      return await this.fetch(url, {
+        ...init,
+        // Redirects can forward upload bodies and signed authentication proofs.
+        redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer',
+      })
     } catch {
       throw new ServerError(0, '서버에 연결하지 못했어요. 네트워크와 서버 상태를 확인해 주세요.')
     }
@@ -125,18 +156,26 @@ export class ServerClient {
       },
     )
     const margin = Math.min(60, res.expires_in / 2)
-    this.session = {
+    return {
       token: res.access_token,
       userId: res.user_id,
       refreshAt: this.now() + (res.expires_in - margin) * 1000,
     }
-    return this.session
   }
 
   /** 동시에 여러 요청이 와도 로그인은 한 번만 한다. */
   async token(): Promise<string> {
+    if (this.adopting) await this.adopting
     if (this.session && this.now() < this.session.refreshAt) return this.session.token
-    this.pending ??= this.signIn().finally(() => { this.pending = undefined })
+    if (!this.pending) {
+      const generation = this.generation
+      const pending = this.signIn().then(session => {
+        this.checkGeneration(generation)
+        this.session = session
+        return session
+      }).finally(() => { if (this.pending === pending) this.pending = undefined })
+      this.pending = pending
+    }
     return (await this.pending).token
   }
 
@@ -144,18 +183,24 @@ export class ServerClient {
   async op(name: string, init: {
     method?: string; body?: BodyInit; version?: string; headers?: Record<string, string>; query?: Record<string, string>
   } = {}): Promise<Response> {
+    if (!/^[a-zA-Z0-9_-]+$/.test(name) || (init.version !== undefined && !/^[a-zA-Z0-9_-]+$/.test(init.version))) throw new ServerError(0, '올바르지 않은 서버 작업 이름이에요.')
     const query = init.query ? `?${new URLSearchParams(init.query)}` : ''
     return this.request(`/op/${name}${init.version ? `/${init.version}` : ''}${query}`, init)
   }
 
   /** 로그인한 사용자로 서버 경로를 부른다(`/auth/passkey/…` 등). 401 이면 한 번 다시 로그인한다. */
   async request(path: string, init: { method?: string; body?: BodyInit; headers?: Record<string, string> } = {}): Promise<Response> {
+    this.requestUrl(path)
+    const generation = this.generation
     const call = async () => {
       const headers = new Headers(init.headers)
       // Only the core may set trusted user headers. Never forward a caller-supplied copy.
       for (const key of [...headers.keys()]) if (key.startsWith('x-mlhops-')) headers.delete(key)
       headers.set('authorization', `Bearer ${await this.token()}`)
-      return this.send(path, { method: init.method ?? 'POST', body: init.body, headers })
+      this.checkGeneration(generation)
+      const response = await this.send(path, { method: init.method ?? 'POST', body: init.body, headers })
+      this.checkGeneration(generation)
+      return response
     }
     let res = await call()
     if (res.status === 401) {
@@ -175,6 +220,18 @@ export class ServerClient {
    * 연결한 뒤에야 저장해 두므로, 연결에 실패하면 이 기기의 원래 계정이 그대로 남는다.
    */
   async adoptAccount(login: { access_token: string; expires_in: number; user_id: string }): Promise<void> {
+    if (this.adopting) throw new ServerError(0, '계정 연결이 이미 진행 중이에요.')
+    const generation = ++this.generation
+    this.pending = undefined
+    const adopting = this.linkAccount(login, generation)
+    this.adopting = adopting
+    try { await adopting } finally { if (this.adopting === adopting) this.adopting = undefined }
+  }
+
+  private async linkAccount(login: { access_token: string; expires_in: number; user_id: string }, generation: number): Promise<void> {
+    // Finish any old device-key creation before replacing the persisted identity.
+    await this.pendingKeys
+    this.checkGeneration(generation)
     const keys = await this.subtle.generateKey(ECDSA, false, ['sign', 'verify']) as CryptoKeyPair
     const { challenge } = await this.postJson<{ challenge: string }>('/auth/challenge')
     // Linking is a different proof from signing in: the core rejects an auth-domain signature.
@@ -193,7 +250,9 @@ export class ServerClient {
       const data = await res.json().catch(() => ({})) as { error?: string }
       throw new ServerError(res.status, data.error ?? `HTTP ${res.status}`)
     }
+    this.checkGeneration(generation)
     await this.opts.store.put(keys)
+    this.checkGeneration(generation)
     const margin = Math.min(60, login.expires_in / 2)
     this.session = { token: login.access_token, userId: login.user_id, refreshAt: this.now() + (login.expires_in - margin) * 1000 }
   }

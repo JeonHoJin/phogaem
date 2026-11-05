@@ -81,6 +81,43 @@ test('four real device-key users share two albums through gateway/core and prese
     expect(await client<number>(pages[3]!, 'probe', { op: 'phogaem-photo-get', query: { albumId: album.id, photoId }, forgedUser: identities[0]!.userId })).toBe(404);
     expect(await client<number>(pages[0]!, 'probe', { op: 'phogaem-album-get', query: { albumId: privateAlbum.id }, forgedUser: identities[3]!.userId })).toBe(404);
 
+    // Bypass client-side header stripping: the actual gateway/core must replace forged identity.
+    const outsiderToken = await pages[3]!.evaluate(async () => {
+      const path = '/phogaem/src/server/index.ts';
+      return (await import(path)).server.token();
+    });
+    const forgedHeaders = {
+      authorization: `Bearer ${outsiderToken}`,
+      'x-mlhops-user-id': identities[0]!.userId,
+      'x-mlhops-core': 'synthetic-forged-core-token',
+      'x-mlhops-op': 'phogaem-albums',
+    };
+    const attempts: Array<{ op: string; method: string; params?: Record<string, string>; data?: Record<string, unknown> | Buffer }> = [
+      { op: 'phogaem-album-get', method: 'GET', params: { albumId: album.id } },
+      { op: 'phogaem-photo-get', method: 'GET', params: { albumId: album.id, photoId } },
+      { op: 'phogaem-invite-create', method: 'POST', data: { albumId: album.id } },
+      { op: 'phogaem-download-state', method: 'POST', data: { albumId: album.id, photoIds: [photoId], state: 'requested' } },
+      { op: 'phogaem-photo-upload', method: 'POST', params: { albumId: album.id, name: 'forged.png' }, data: Buffer.from(imageBytes) },
+    ];
+    for (const attempt of attempts) {
+      const denied = await pages[3]!.request.fetch(`${apiBase}/op/${attempt.op}/v1`, {
+        ...attempt,
+        headers: { ...forgedHeaders, 'content-type': Buffer.isBuffer(attempt.data) ? 'image/png' : 'application/json' },
+      });
+      expect(denied.status(), `raw forged headers: ${attempt.op}`).toBe(404);
+    }
+    const segments = outsiderToken.split('.');
+    segments[1] = Buffer.from(JSON.stringify({ sub: identities[0]!.userId, exp: Math.floor(Date.now() / 1000) + 3600 })).toString('base64url');
+    const tampered = await pages[3]!.request.get(`${apiBase}/op/phogaem-albums/v1`, {
+      headers: { authorization: `Bearer ${segments.join('.')}` },
+    });
+    expect(tampered.status()).toBe(401);
+
+    const metadata = await pages[3]!.request.get(`${apiBase}/op/phogaem-albums/v1`, { headers: { authorization: `Bearer ${outsiderToken}`, origin: 'https://untrusted.invalid' } });
+    expect(metadata.status()).toBe(200);
+    expect(metadata.headers()['access-control-allow-origin']).toBeUndefined();
+    expect(metadata.headers()['cache-control']).toContain('no-store');
+
     await client(pages[2]!, 'state', { albumId: album.id, photoIds: [photoId], state: 'requested' });
     let own = await client<typeof shared>(pages[2]!, 'get', { albumId: album.id });
     expect(own.photos[0]!.requestedBy).toEqual([identities[2]!.userId]);
@@ -268,6 +305,7 @@ test('approval gates all photo operations, invitations cannot bypass it, and rev
     await owner.goto('./');
     await approveIdentity(owner);
     const album = await client<{ id: string }>(owner, 'create', { title: '승인 확인용 여행' });
+    await client(owner, 'upload', { albumId: album.id, name: 'before-revoke.png', bytes: imageBytes });
     const invite = await client<{ token: string }>(owner, 'invite', { albumId: album.id });
     const blockedInvite = await page.request.post(`${apiBase}/op/phogaem-invite-join/v1`, {
       headers: { authorization: `Bearer ${token}` }, data: { token: invite.token },
@@ -283,11 +321,31 @@ test('approval gates all photo operations, invitations cannot bypass it, and rev
     await page.getByLabel('초대 코드', { exact: true }).fill(invite.token);
     await page.getByRole('button', { name: '초대 코드로 참여', exact: true }).click();
     await expect(page.getByRole('heading', { name: '승인 확인용 여행', exact: true })).toBeVisible();
-    await setApproval(page, pending.userId, false);
+    await expect(page.locator('article.photo-card')).toHaveCount(1);
+    // Revoke between two real uploads: a partial-success message must retain the
+    // approval error type so existing protected photos and controls are cleared.
+    await expect(page.getByRole('img', { name: 'before-revoke.png', exact: true })).toBeVisible();
+    let uploadCount = 0;
+    await page.route(`${apiBase}/op/phogaem-photo-upload/v1?*`, async route => {
+      if (++uploadCount === 1) {
+        const response = await route.fetch();
+        expect(response.status()).toBe(200);
+        await setApproval(page, pending.userId, false);
+        await route.fulfill({ response });
+      } else await route.continue();
+    });
+    await page.getByLabel('사진 파일 선택').setInputFiles([
+      { name: 'first-upload.png', mimeType: 'image/png', buffer: Buffer.from(imageBytes) },
+      { name: 'second-upload.png', mimeType: 'image/png', buffer: Buffer.concat([Buffer.from(imageBytes), Buffer.from('synthetic metadata')]) },
+    ]);
+    await expect(page.getByRole('heading', { name: '승인 대기 중', exact: true })).toBeVisible();
+    await expect(page.locator('article.photo-card')).toHaveCount(0);
+    await expect(page.getByRole('dialog').getByRole('alert')).toContainText('처리 후 중단');
+    expect(uploadCount).toBe(2);
     const revoked = await page.request.get(`${apiBase}/op/phogaem-albums/v1`, { headers: { authorization: `Bearer ${token}` } });
     expect(revoked.status()).toBe(403);
     expect(await revoked.json()).toEqual({ error: 'approval required' });
-    await page.getByRole('button', { name: '새로고침', exact: true }).click();
+    await page.getByRole('button', { name: '승인 상태 다시 확인', exact: true }).click();
     await expect(page.getByRole('heading', { name: '승인 대기 중', exact: true })).toBeVisible();
     await expect(page.getByLabel('공유보관함 선택', { exact: true })).toHaveCount(0);
   } finally {

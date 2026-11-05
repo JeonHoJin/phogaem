@@ -4,13 +4,15 @@
 
 GitHub Pages는 GitHub Actions 배포 소스를 사용한다. `main`에 푸시하면 `.github/workflows/check.yml`에서 다음 순서로 검사하고, 모두 성공한 빌드만 배포한다.
 
-1. 고정된 lockfile로 의존성 설치.
+1. 고정된 lockfile로 의존성 설치, high/critical 취약점 감사.
 2. 린트, Node 단위 테스트, 모델 호출 없는 Python 실험 도구 테스트.
 3. 운영 HTTPS 게이트웨이를 지정해 정적 빌드.
-4. Chromium의 로컬 브라우저 시나리오.
+4. Chromium의 로컬 브라우저 시나리오와 실제 배포 빌드의 CSP·사진 왕복 테스트.
 5. `dist/`만 Pages 아티팩트로 올리고 배포.
 
 PR은 검사만 수행한다. Pages 쓰기와 OIDC 권한은 배포 작업에만 부여한다. 모델 추론, R2 사용, mlhops 서버 재배포는 이 워크플로에서 수행하지 않는다. 정적 경로는 `/phogaem/`이며 서버 인증 정보는 빌드에 넣지 않는다.
+
+보안 보강 내용과 아직 남은 경계는 [보안 점검 기록](security.md)을 참고한다.
 
 ## 접속과 인증
 

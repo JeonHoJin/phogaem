@@ -24,6 +24,7 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm audit --audit-level=high
       - run: npm run lint
       - run: npm test
       - run: npm run test:vision
@@ -32,6 +33,7 @@ jobs:
           VITE_MLHOPS_API_BASE: https://168-107-32-199.sslip.io
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
+      - run: npm run test:production
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: failure()
         with:

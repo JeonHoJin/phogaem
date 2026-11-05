@@ -26,6 +26,7 @@
     "tests",
     "vite.config.ts",
     "playwright.config.ts",
-    "playwright.shared.config.ts"
+    "playwright.shared.config.ts",
+    "playwright.production.config.ts"
   ]
 }
