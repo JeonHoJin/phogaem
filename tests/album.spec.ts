@@ -191,7 +191,7 @@ test('mobile 390px has no horizontal overflow and supports selecting and opening
   await page.setViewportSize({ width: 390, height: 844 });
   await seed(page);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  await page.getByRole('button', { name: / 선택$/ }).first().click();
+  await cards(page).first().getByRole('button', { name: / 선택$/ }).click();
   await expect(page.getByRole('complementary', { name: '선택한 사진' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: 'test-results/phogaem-mobile.png', fullPage: true });

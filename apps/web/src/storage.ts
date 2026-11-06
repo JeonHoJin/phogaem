@@ -3,7 +3,7 @@ import type { MemberId, Photo, PhotoFilter } from './domain.ts';
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
 const FILTERS: PhotoFilter[] = ['all', 'others', 'mine', 'duplicates', 'unreceived'];
-type Preferences = { filters: PhotoFilter[]; member: MemberId };
+type Preferences = { filters: PhotoFilter[]; member: MemberId; columns?: number };
 
 function namespace(): string {
   const segment = typeof location === 'undefined' ? '' : location.pathname.split('/').filter(Boolean)[0];
@@ -128,7 +128,7 @@ export function loadPreferences(): Preferences {
     if (value && typeof value === 'object' && 'member' in value && 'filters' in value &&
       MEMBERS.some((member) => member.id === value.member) && Array.isArray(value.filters) &&
       value.filters.every((filter: unknown) => FILTERS.includes(filter as PhotoFilter))) {
-      return { member: value.member as MemberId, filters: value.filters as PhotoFilter[] };
+      return { member: value.member as MemberId, filters: value.filters as PhotoFilter[], ...('columns' in value && Number.isInteger(value.columns) && (value.columns as number) >= 2 && (value.columns as number) <= 8 ? { columns: value.columns as number } : {}) };
     }
   } catch { /* A blocked or corrupted preference store must not prevent opening the album. */ }
   return { member: 'me', filters: ['all'] };

@@ -26,6 +26,12 @@ test('preferences are namespaced, validated and tolerate unavailable storage', (
     savePreferences({ member: 'sora', filters: ['others', 'unreceived'] });
     assert.equal([...values.keys()][0], 'phogaem:/:preferences');
     assert.deepEqual(loadPreferences(), { member: 'sora', filters: ['others', 'unreceived'] });
+    savePreferences({ member: 'me', filters: ['all'], columns: 6 });
+    assert.deepEqual(loadPreferences(), { member: 'me', filters: ['all'], columns: 6 });
+    for (const columns of [0, 1, 9, 2.5, '4', null]) {
+      values.set('phogaem:/:preferences', JSON.stringify({ member: 'me', filters: ['all'], columns }));
+      assert.deepEqual(loadPreferences(), { member: 'me', filters: ['all'] });
+    }
     values.set('phogaem:/:preferences', '{broken');
     assert.deepEqual(loadPreferences(), { member: 'me', filters: ['all'] });
     values.set('phogaem:/:preferences', JSON.stringify({ member: 'unknown', filters: ['all'] }));

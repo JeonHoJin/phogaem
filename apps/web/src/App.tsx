@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { PhotoGrid } from './PhotoGrid';
 import * as sharedApi from './server/api';
 import { ApprovalRequired } from './server/api';
 import type { Album, SharedMember, SimilarPhotos } from './server/api';
@@ -10,9 +11,10 @@ import { MEMBERS, defaultAlbumName, mergeUploadedPhoto, filterPhotos, formatByte
 import type { MemberId, Photo, PhotoFilter, ProcessingKind, ProcessingJob } from './domain';
 import { validateFile as validateLocalFile, importPhotos, loadPhotos, loadPreferences, savePreferences, seedDemo, setDownloadState } from './storage';
 
-type IconName = 'plus' | 'arrow' | 'download' | 'check' | 'close' | 'left' | 'right' | 'expand' | 'play' | 'pause' | 'image' | 'layers' | 'lock' | 'retry' | 'alert' | 'copy' | 'user' | 'clock' | 'sparkles' | 'star';
+type IconName = 'plus' | 'arrow' | 'download' | 'check' | 'close' | 'left' | 'right' | 'expand' | 'play' | 'pause' | 'image' | 'layers' | 'lock' | 'retry' | 'alert' | 'copy' | 'user' | 'clock' | 'sparkles' | 'star' | 'minus';
 function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
   const paths: Record<IconName, ReactNode> = {
+    minus: <path d="M5 12h14" />,
     star: <path d="m12 3 2.8 5.8 6.4.9-4.6 4.5 1.1 6.4-5.7-3-5.7 3 1.1-6.4-4.6-4.5 6.4-.9Z" />,
     clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
     sparkles: <><path d="m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z" /><path d="M20 2v4m-2-2h4" /></>,
@@ -35,6 +37,10 @@ function Icon({ name, size = 20 }: { name: IconName; size?: number }) {
     layers: <><path d="m12 3 10 5-10 5L2 8Zm-10 9 10 5 10-5M2 16l10 5 10-5" /></>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.65" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>;
+}
+
+function gridColumnLimit() {
+  return window.innerWidth < 600 ? Math.max(2, Math.min(6, Math.floor((window.innerWidth * 0.88 + 5) / 49))) : 8;
 }
 
 const RESUME_KEY = `phogaem:${import.meta.env.BASE_URL}:resume-shared`;
@@ -105,7 +111,7 @@ function Preview({ photo, large = false, thumbnailOnly = false }: { photo: Photo
     return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl); };
   }, [photo.id, photo.albumId, photo.blob, thumbnailState, near, retry, onApprovalRequired]);
   return <div ref={container} className="preview-container">{thumbnailState && thumbnailState !== 'succeeded' ? <span className="preview-loading" role="img" aria-label={`${photo.name} 미리보기 ${thumbnailState === 'failed' ? '없음' : '준비 중'}`}><Icon name={thumbnailState === 'pending' ? 'clock' : thumbnailState === 'running' ? 'retry' : 'image'} size={32} /></span> : error || decodeFailed ? <div className="preview-fallback" role="img" aria-label="미리보기 없음"><Icon name={error ? 'alert' : 'image'} size={large ? 52 : 30} />{error && large && <button className="icon-button" aria-label="미리보기 재시도" onClick={() => setRetry(retry + 1)}><Icon name="retry" /></button>}</div>
-    : url ? <img src={url} alt={photo.name} loading={large ? 'eager' : 'lazy'} onError={() => setDecodeFailed(true)} /> : <span className="preview-loading" aria-label="사진 불러오는 중"><Icon name="image" size={large ? 40 : 24} /></span>}</div>;
+    : url ? <img draggable={false} src={url} alt={photo.name} loading={large ? 'eager' : 'lazy'} onError={() => setDecodeFailed(true)} /> : <span className="preview-loading" aria-label="사진 불러오는 중"><Icon name="image" size={large ? 40 : 24} /></span>}</div>;
 }
 
 function ProcessingIndicator({ photo, kind, job, disabled, onRetry }: { photo: Photo; kind: ProcessingKind; job: ProcessingJob; disabled: boolean; onRetry: () => void }) {
@@ -114,14 +120,14 @@ function ProcessingIndicator({ photo, kind, job, disabled, onRetry }: { photo: P
   return job.state === 'failed' ? <button className="processing-state failed" aria-label={label} disabled={disabled} onClick={onRetry}>{content}</button> : <span className={`processing-state ${job.state}`} role="img" aria-label={label}>{content}</span>;
 }
 
-function PhotoCard({ photo, member, members, selected, onSelect, onView, onRetry, busy, stackCount = 1, stackPhotos = [] }: { photo: Photo; stackCount?: number; stackPhotos?: Photo[]; member: MemberId; members: SharedMember[]; selected: boolean; onSelect: () => void; onView: () => void; onRetry: (kind: ProcessingKind) => void; busy: boolean }) {
+function PhotoCard({ photo, member, members, selected, onSelect, onView, onRetry, busy, stackCount = 1, stackPhotos = [], selectionMode = false }: { photo: Photo; selectionMode?: boolean; stackCount?: number; stackPhotos?: Photo[]; member: MemberId; members: SharedMember[]; selected: boolean; onSelect: () => void; onView: () => void; onRetry: (kind: ProcessingKind) => void; busy: boolean }) {
   const received = photo.receivedBy.includes(member);
   const duplicate = (photo.importCount ?? photo.contributors.length) > 1;
-  return <article className={`photo-card ${selected ? 'is-selected' : ''} ${stackCount > 1 ? 'photo-stack' : ''}`}>
+  return <article data-photo-id={photo.id} className={`photo-card ${selected ? 'is-selected' : ''} ${stackCount > 1 ? 'photo-stack' : ''}`}>
     {stackPhotos.slice(1, 3).reverse().map(value => <div key={value.id} className="photo-stack-layer" aria-hidden="true"><Preview photo={value} thumbnailOnly /></div>)}
     <div className="photo-frame">
-      <button className="photo-open" onClick={onView} aria-label={`${photo.name} 크게 보기`}><Preview photo={photo} /></button>
-      <button className="photo-select" aria-label={`${photo.name} 선택`} aria-pressed={selected} onClick={onSelect}>{selected && <Icon name="check" size={15} />}</button>
+      <button className="photo-open" disabled={busy && selectionMode} onClick={onView} aria-label={`${photo.name} ${selectionMode ? '선택 전환' : '크게 보기'}`} aria-pressed={selectionMode ? selected : undefined}><Preview photo={photo} /></button>
+      <button className="photo-select" aria-label={`${photo.name} 선택`} aria-pressed={selected} disabled={busy} onClick={onSelect}>{selected && <Icon name="check" size={15} />}</button>
       {(duplicate || stackCount > 1) && <span className="photo-badge duplicate" aria-label={`중복 ${stackCount > 1 ? stackCount : photo.importCount ?? photo.contributors.length}`}><Icon name="layers" size={13} />{stackCount > 1 ? stackCount : photo.importCount ?? photo.contributors.length}</span>}
       {received && <span className="photo-badge received"><Icon name="check" size={13} /></span>}
     </div>
@@ -208,6 +214,9 @@ function Comparison({ photos, selected, selectedCount, busy, initialPage, onSele
 
 export default function App() {
   const [preferences] = useState(loadPreferences);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [maxColumns, setMaxColumns] = useState(gridColumnLimit);
+  const [columns, setColumns] = useState(() => Math.min(preferences.columns ?? (window.innerWidth < 600 ? 2 : window.innerWidth < 1100 ? 3 : 4), gridColumnLimit()));
   const [localMember, setLocalMember] = useState<MemberId>(preferences.member);
   const [remote, setRemote] = useState<{ userId: string; albums: Album[]; album: Album | null; members: SharedMember[] } | null>(null);
   const [localMode, setLocalMode] = useState(false);
@@ -274,6 +283,7 @@ export default function App() {
   const visible = useMemo(() => stacks.map(stack => stack.representative).filter(p => matchesFilters(p, filters, member, similarIds)), [stacks, filters, member, similarIds]);
   const downloadReady = !remote?.album || !!candidates && !candidatesLoading && !candidatesError;
   const normalizedDownloadIds = useMemo(() => downloadIds === null ? null : representativeDownloadIds(downloadIds, stacks), [downloadIds, stacks]);
+  const visibleIds = useMemo(() => visible.map(photo => photo.id), [visible]);
   const selectedPhotos = visible.filter(p => selected.has(p.id));
   const totalSize = photos.reduce((sum, p) => sum + p.size, 0);
   const duplicateCount = filterPhotos(stacks.map(stack => stack.representative), 'duplicates', member, similarIds).length;
@@ -300,10 +310,15 @@ export default function App() {
     return () => { active = false; };
   }, []);
   useEffect(() => {
-    try { savePreferences({ member: localMember, filters }); }
+    try { savePreferences({ member: localMember, filters, columns }); }
     catch { setError('화면 설정을 저장하지 못했어요. 사이트 저장소를 확인해 주세요.'); }
-    setSelected(new Set());
-  }, [localMember, filters]);
+  }, [localMember, filters, columns]);
+  useEffect(() => { setSelected(new Set()); }, [localMember, filters]);
+  useEffect(() => {
+    const resize = () => { const max = gridColumnLimit(); setMaxColumns(max); setColumns(value => Math.min(value, max)); };
+    window.addEventListener('resize', resize);
+    return () => window.removeEventListener('resize', resize);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -328,7 +343,7 @@ export default function App() {
     originalReads.clear(); thumbnailReads.clear();
     setApprovalCode(reason.accountCode);
     setRemote(null); setPhotos([]); setSelected(new Set());
-    setViewerId(null); setDownloadIds(null); setInviteLink('');
+    setSelectionMode(false); setViewerId(null); setDownloadIds(null); setInviteLink('');
     retryAction.current = null; setNotice(''); setError(''); setManagerOpen(true); setLocalMode(false);
   }, [clearComparison]);
 
@@ -518,7 +533,7 @@ export default function App() {
   }
   const clearTransient = useCallback(() => {
     clearComparison();
-    setSelected(new Set()); setViewerId(null); setDownloadIds(null); setInviteLink(''); setNotice(''); setCopied(false); setQueuedFiles([]); setProgress(null);
+    setSelectionMode(false); setSelected(new Set()); setViewerId(null); setDownloadIds(null); setInviteLink(''); setNotice(''); setCopied(false); setQueuedFiles([]); setProgress(null);
   }, [clearComparison]);
   async function connectShared(passkey = false) {
     if (loading) return;
@@ -722,12 +737,12 @@ export default function App() {
         {queuedFiles.length > 0 && <section className="upload-queue" aria-label="업로드 파일"><div className="queue-progress">{progress && <><progress value={progress.done} max={progress.total} aria-label="업로드" /><output>{progress.done}/{progress.total}</output></>}</div>{queuedFiles.map((file, index) => <div className="queue-item" key={`${index}:${file.name}`}><Icon name={error ? 'alert' : 'image'} /><span>{file.name}</span><span>{formatBytes(file.size)}</span>{!busy && <button className="icon-button" aria-label={`${file.name} 대기열에서 제거`} onClick={() => { setQueuedFiles(current => current.filter((_, i) => i !== index)); }}><Icon name="close" /></button>}</div>)}{!busy && <button className="button secondary" disabled={!queuedValid} onClick={() => void upload(queuedFiles)}>올리기</button>}</section>}
         <section className="library" aria-label="사진 보관함"><div className="library-top"><span>{photos.length}</span><button className="text-button" disabled={!pendingPhotos.length || busy} onClick={() => setDownloadIds(pendingPhotos.map(p => p.id))}><Icon name="download" size={16} />다운로드 기록 {pendingPhotos.length > 0 && <span>{pendingPhotos.length}</span>}</button></div>
           <div className="filter-row"><div className="filter-chips" aria-label="사진 필터">{FILTERS.map(filter => <button key={filter.id} className={`filter-chip ${filters.includes(filter.id) ? 'active' : ''}`} aria-label={filter.label} aria-pressed={filters.includes(filter.id)} onClick={() => toggleFilter(filter.id)}>{({ all: '전체', others: '내 사진 제외', mine: '내 사진', unreceived: '받은 사진 제외', duplicates: '중복' })[filter.id]}{filter.id === 'duplicates' && duplicateCount > 0 && <span>{duplicateCount}</span>}</button>)}</div></div>
-          <div className="selection-row"><label className="select-all"><input type="checkbox" aria-label="현재 사진 전체 선택" checked={visible.length > 0 && visible.every(p => selected.has(p.id))} disabled={!visible.length || busy} onChange={event => setSelected(event.target.checked ? new Set(visible.map(p => p.id)) : new Set())} />전체 선택</label><span>{visible.length}</span></div>
+          <div className="selection-row"><label className="select-all"><input type="checkbox" aria-label="현재 사진 전체 선택" checked={visible.length > 0 && visible.every(p => selected.has(p.id))} disabled={!visible.length || busy} onChange={event => setSelected(event.target.checked ? new Set(visible.map(p => p.id)) : new Set())} />전체 선택</label><div className="selection-tools"><span>{visible.length}</span><button className="text-button" aria-label="사진 선택" aria-pressed={selectionMode} disabled={busy || !visible.length} onClick={() => setSelectionMode(value => !value)}>{selectionMode ? '완료' : '선택'}</button><div className="grid-zoom"><button className="icon-button" aria-label="사진 확대" disabled={busy || columns <= 2} onClick={() => setColumns(value => Math.max(2, value - 1))}><Icon name="plus" size={16} /></button><output aria-label="한 줄 사진 수">{columns}</output><button className="icon-button" aria-label="사진 축소" disabled={busy || columns >= maxColumns} onClick={() => setColumns(value => Math.min(maxColumns, value + 1))}><Icon name="minus" size={16} /></button></div></div></div>
           {!comparisonMode && remote?.album && (candidatesLoading ? <div role="status" aria-label="중복 후보 불러오는 중"><span className="loading-dot" /></div> : candidatesError ? <div className="failure-controls" role="group" aria-label="중복 후보 불러오기 실패"><Icon name="alert" /><span className="visually-hidden" role="alert">{candidatesError}</span><button className="icon-button" aria-label="재시도" disabled={busy} onClick={() => void loadCandidates(false)}><Icon name="retry" /></button></div> : null)}
           {comparisonMode && remote?.album ? <section className="similar-board" aria-label="비교 후보" aria-busy={candidatesLoading}>
             <header className="similar-board-header"><h2>비교</h2><div className="candidate-counts"><output aria-label="비교 후보 수">{candidates ? candidateGroups.length : '—'}</output>{candidates && <><span role="img" aria-label={`분석 완료 ${candidates.analyzed}`}><Icon name="check" size={16} />{candidates.analyzed}</span>{candidates.pending > 0 && <span role="img" aria-label={`분석 대기 ${candidates.pending}`}><Icon name="clock" size={16} />{candidates.pending}</span>}{candidates.failed > 0 && <span role="img" aria-label={`분석 실패 ${candidates.failed}`}><Icon name="alert" size={16} />{candidates.failed}</span>}</>}<button className="icon-button" aria-label="후보 새로고침" disabled={busy || candidatesLoading} onClick={() => void loadCandidates()}><Icon name="retry" /></button></div></header>
             {candidatesLoading ? <div className="empty-state" role="status" aria-label="비교 후보 불러오는 중"><span className="loading-dot" /></div> : candidatesError ? <div className="failure-controls" role="group" aria-label="비교 후보 불러오기 실패"><Icon name="alert" /><span className="visually-hidden" role="alert">{candidatesError}</span><button className="icon-button" aria-label="재시도" disabled={busy} onClick={() => void loadCandidates()}><Icon name="retry" /></button></div> : candidateGroups.length > 0 ? <div className="candidate-grid">{candidateGroups.map((group, index) => <button className="candidate-group" key={group.id} aria-label={`비교 후보 ${index + 1} 열기`} onClick={() => { setComparisonPage(0); setComparisonGroupId(group.id); }}><div className="candidate-previews">{group.photos.slice(0, 4).map(photo => <div key={photo.id}><Preview photo={photo} thumbnailOnly /></div>)}</div><span><Icon name="layers" size={16} /><output>{group.photos.length}</output></span></button>)}</div> : <div className="empty-state"><Icon name="layers" size={48} />{candidates && <output>0</output>}{candidates && candidates.groups.length > 0 && <button className="button secondary" onClick={() => setFilters(['all'])}>필터 초기화</button>}</div>}
-          </section> : loading ? <div className="empty-state" aria-label="보관함 불러오는 중"><span className="loading-dot" /></div> : photos.length === 0 ? <div className="empty-state"><Icon name="image" size={56} /><button className="button primary" aria-label="첫 사진 올리기" disabled={busy} onClick={() => fileInput.current?.click()}><Icon name="plus" />올리기</button></div> : !visible.length ? <div className="empty-state"><Icon name="image" size={48} /><button className="button secondary" onClick={() => setFilters(['all'])}>필터 초기화</button></div> : <div className="photo-grid">{visible.map(photo => <PhotoCard key={photo.id} photo={photo} member={member} members={members} selected={selected.has(photo.id)} onSelect={() => selectPhoto(photo.id)} onView={() => { const stack = stacks.find(value => value.representative.id === photo.id); if (stack && stack.photos.length > 1) { setComparisonPage(0); setComparisonGroupId(stack.id); } else setViewerId(photo.id); }} stackCount={stacks.find(stack => stack.representative.id === photo.id)?.photos.length} stackPhotos={stacks.find(stack => stack.representative.id === photo.id)?.photos} busy={busy} onRetry={kind => void retryPhotoProcessing(photo, kind)} />)}<button className="add-card" aria-label="사진 더 올리기" disabled={busy} onClick={() => fileInput.current?.click()}><Icon name="plus" size={32} /></button></div>}
+          </section> : loading ? <div className="empty-state" aria-label="보관함 불러오는 중"><span className="loading-dot" /></div> : photos.length === 0 ? <div className="empty-state"><Icon name="image" size={56} /><button className="button primary" aria-label="첫 사진 올리기" disabled={busy} onClick={() => fileInput.current?.click()}><Icon name="plus" />올리기</button></div> : !visible.length ? <div className="empty-state"><Icon name="image" size={48} /><button className="button secondary" onClick={() => setFilters(['all'])}>필터 초기화</button></div> : <PhotoGrid ids={visibleIds} selected={selected} onSelectionChange={setSelected} selectionMode={selectionMode} disabled={busy || loading || !!viewerId || !!comparisonGroupId || managerOpen || needsNickname || !!downloadIds} columns={columns} maxColumns={maxColumns} onColumnsChange={setColumns}>{visible.map(photo => <PhotoCard key={photo.id} photo={photo} member={member} members={members} selectionMode={selectionMode} selected={selected.has(photo.id)} onSelect={() => selectPhoto(photo.id)} onView={() => { if (selectionMode) { selectPhoto(photo.id); return; } const stack = stacks.find(value => value.representative.id === photo.id); if (stack && stack.photos.length > 1) { setComparisonPage(0); setComparisonGroupId(stack.id); } else setViewerId(photo.id); }} stackCount={stacks.find(stack => stack.representative.id === photo.id)?.photos.length} stackPhotos={stacks.find(stack => stack.representative.id === photo.id)?.photos} busy={busy} onRetry={kind => void retryPhotoProcessing(photo, kind)} />)}<button className="add-card" aria-label="사진 더 올리기" disabled={busy} onClick={() => fileInput.current?.click()}><Icon name="plus" size={32} /></button></PhotoGrid>}
         </section>
       </>}
     </main>
