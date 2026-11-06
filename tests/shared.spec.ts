@@ -63,6 +63,9 @@ async function connectApprovedUi(page: Page) {
   await page.getByRole('button', { name: '새로고침', exact: true }).click();
   await page.getByRole('region', { name: '여행 보관함 목록' }).getByRole('button', { name: '만들기', exact: true }).click();
   await expect(page.getByLabel('보관함 이름', { exact: true })).toBeVisible();
+  const manager = page.getByRole('dialog', { name: '공유보관함 관리' });
+  await expect(manager.getByRole('button', { name: '만들기', exact: true })).toBeDisabled();
+  await manager.getByLabel('닉네임', { exact: true }).fill('여행 주인');
 }
 
 test('four real device-key users share two albums through gateway/core and preserve originals', async ({ browser }) => {
@@ -155,9 +158,15 @@ test('shared-library UI creates, invites, shares and downloads an original after
   await page.goto('./');
   await connectApprovedUi(page);
   await page.getByLabel('보관함 이름', { exact: true }).fill('브라우저에서 만든 여행');
+  await page.getByLabel('닉네임', { exact: true }).fill('  여행 주인  ');
+  const creation = page.waitForRequest(request => request.url().includes('/op/phogaem-album-create/'));
   await page.getByRole('dialog', { name: '공유보관함 관리' }).getByRole('button', { name: '만들기', exact: true }).click();
-  await completeNickname(page, '여행 주인');
+  expect((await creation).postDataJSON()).toEqual({ title: '브라우저에서 만든 여행', nickname: '여행 주인' });
+  await expect(page.getByRole('dialog', { name: '닉네임 설정', exact: true })).toHaveCount(0);
   await expect(page.getByLabel('공유보관함 선택', { exact: true })).toBeVisible();
+  const createdId = await page.getByLabel('공유보관함 선택', { exact: true }).inputValue();
+  const created = await client<{ members: Array<{ name: string; nickname: string }> }>(page, 'get', { albumId: createdId });
+  expect(created.members[0]).toMatchObject({ name: '여행 주인', nickname: '여행 주인' });
   await page.getByRole('button', { name: '새로고침', exact: true }).click();
   await expect(page.getByRole('heading', { name: '브라우저에서 만든 여행', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '올리기', exact: true })).toBeEnabled();
@@ -236,7 +245,7 @@ test('a failed album switch keeps the previous album and its photos together unt
   await connectApprovedUi(page);
   await page.getByLabel('보관함 이름', { exact: true }).fill('사진이 있는 여행 A');
   await page.getByRole('dialog', { name: '공유보관함 관리' }).getByRole('button', { name: '만들기', exact: true }).click();
-  await completeNickname(page, '여행 A 주인');
+  await expect(page.getByRole('dialog', { name: '닉네임 설정', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '올리기', exact: true })).toBeEnabled();
   await page.getByLabel('사진 파일 선택').setInputFiles({ name: 'album-a.png', mimeType: 'image/png', buffer: Buffer.from(imageBytes) });
   await expect(page.locator('article.photo-card')).toHaveCount(1);
@@ -260,7 +269,7 @@ test('a failed album switch keeps the previous album and its photos together unt
   if (await close.isVisible()) await close.click();
   await page.unroute(`${apiBase}/op/phogaem-album-get/v1?*`);
   await page.getByLabel('공유보관함 선택', { exact: true }).selectOption({ label: '새로운 여행 B' });
-  await completeNickname(page, '여행 B 주인');
+  await expect(page.getByRole('dialog', { name: '닉네임 설정', exact: true })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: '새로운 여행 B', exact: true })).toBeVisible();
   await expect(page.locator('article.photo-card')).toHaveCount(0);
 });
@@ -440,7 +449,7 @@ test('a partially failed shared upload shows committed photos and retries only t
   await connectApprovedUi(page);
   await page.getByLabel('보관함 이름', { exact: true }).fill('업로드 복구 여행');
   await page.getByRole('dialog', { name: '공유보관함 관리' }).getByRole('button', { name: '만들기', exact: true }).click();
-  await completeNickname(page, '복구 여행 주인');
+  await expect(page.getByRole('dialog', { name: '닉네임 설정', exact: true })).toHaveCount(0);
   const albumId = await page.getByLabel('공유보관함 선택', { exact: true }).inputValue();
   let attempts = 0;
   let failedOnce = false;
@@ -497,7 +506,7 @@ test('parallel completions update photos and the remaining queue before the batc
   await connectApprovedUi(page);
   await page.getByLabel('보관함 이름', { exact: true }).fill('병렬 완료 여행');
   await page.getByRole('dialog', { name: '공유보관함 관리' }).getByRole('button', { name: '만들기', exact: true }).click();
-  await completeNickname(page, '병렬 여행 주인');
+  await expect(page.getByRole('dialog', { name: '닉네임 설정', exact: true })).toHaveCount(0);
   await expect(page.getByLabel('공유보관함 선택', { exact: true })).toBeVisible();
   let releaseFirst!: () => void;
   let releaseThird!: () => void;

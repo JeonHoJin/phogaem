@@ -215,6 +215,7 @@ export default function App() {
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [rejectedFiles, setRejectedFiles] = useState<Set<File>>(new Set());
   const [nickname, setNickname] = useState('');
+  const [ownerNickname, setOwnerNickname] = useState('');
   const [passkeyRegistered, setPasskeyRegistered] = useState(false);
   const [copied, setCopied] = useState(false);
   const retryAction = useRef<(() => Promise<Photo[]>) | null>(null);
@@ -541,11 +542,15 @@ export default function App() {
     const today = defaultAlbumName();
     const previousSuggestion = suggestedTitle.current;
     setAlbumTitle(current => current === previousSuggestion ? today : current);
-    suggestedTitle.current = today; setNickname(remote?.members.find(value => value.id === remote.userId)?.nickname ?? ''); setManagerOpen(true);
+    suggestedTitle.current = today;
+    const ownName = remote?.members.find(value => value.id === remote.userId)?.nickname ?? '';
+    setNickname(ownName); setOwnerNickname(ownName); setManagerOpen(true);
   }
   async function createSharedAlbum() {
+    const ownName = ownerNickname.trim();
+    if (!ownName || [...ownName].length > 24 || /\p{Cc}/u.test(ownerNickname)) { setError('닉네임 확인 필요'); return; }
     await mutate(async () => {
-      const album = await sharedApi.createAlbum(albumTitle.trim());
+      const album = await sharedApi.createAlbum(albumTitle.trim(), ownName);
       const result = await sharedApi.listAlbums();
       setRemote(previous => previous ? { ...previous, albums: result.albums } : previous);
       const loaded = await refreshAlbum(album.id);
@@ -749,7 +754,7 @@ export default function App() {
           <button className="button primary" disabled={busy || !inviteToken.trim()}>{inviteFailure === 'invalid' ? '참여' : '재시도'}</button>
         </form> : <div className="empty-state" role="status" aria-label="보관함 참여 중"><span className="loading-dot" /></div>}
       </section> : <>
-        <form className="shared-form" onSubmit={event => { event.preventDefault(); void createSharedAlbum(); }}><label htmlFor="album-name">보관함 이름</label><div><input id="album-name" aria-label="보관함 이름" value={albumTitle} maxLength={80} required onChange={event => setAlbumTitle(event.target.value)} disabled={busy} /><button className="button primary" disabled={busy || !albumTitle.trim()}>만들기</button></div></form>
+        <form className="shared-form" onSubmit={event => { event.preventDefault(); void createSharedAlbum(); }}><label htmlFor="album-name">보관함 이름</label><input id="album-name" aria-label="보관함 이름" value={albumTitle} maxLength={80} required onChange={event => setAlbumTitle(event.target.value)} disabled={busy} /><label htmlFor="owner-nickname">닉네임</label><div><input id="owner-nickname" aria-label="닉네임" value={ownerNickname} maxLength={24} required autoComplete="nickname" onChange={event => setOwnerNickname(event.target.value)} disabled={busy} /><button className="button primary" disabled={busy || !albumTitle.trim() || !ownerNickname.trim()}>만들기</button></div></form>
         <form className="shared-form" onSubmit={event => { event.preventDefault(); void joinSharedAlbum(); }}><label htmlFor="invite-token">초대 코드</label><input id="invite-token" aria-label="초대 코드" value={inviteToken} onChange={event => setInviteToken(event.target.value)} maxLength={2048} required disabled={busy} aria-invalid={!!error && !!inviteToken} /><button className="button secondary" disabled={busy || !inviteToken.trim()}>참여</button></form>
         {inviteLink && <div className="shared-form"><label htmlFor="share-link">초대 링크</label><input id="share-link" aria-label="초대 링크" value={inviteLink} readOnly onFocus={event => event.target.select()} /><time>{new Date(inviteExpires).toLocaleString('ko-KR')}</time><button className="button secondary" aria-label="초대 링크 복사" onClick={async () => { try { await navigator.clipboard.writeText(inviteLink); setCopied(true); } catch { setCopied(false); document.getElementById('share-link')?.focus(); } }}><Icon name={copied ? 'check' : 'copy'} />복사</button></div>}
         {remote.album && <form className="member-name-form" onSubmit={event => { event.preventDefault(); void saveNickname(); }}><label htmlFor="own-nickname">내 닉네임<input id="own-nickname" aria-label="내 닉네임" value={nickname} maxLength={24} required disabled={busy} onChange={event => setNickname(event.target.value)} /></label><button className="button secondary" disabled={busy || !nickname.trim()}>저장</button></form>}
