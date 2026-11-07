@@ -27,6 +27,7 @@
     "vite.config.ts",
     "playwright.config.ts",
     "playwright.shared.config.ts",
-    "playwright.production.config.ts"
+    "playwright.production.config.ts",
+    "playwright.google.config.ts"
   ]
 }

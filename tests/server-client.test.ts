@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ServerClient, ServerError, base64url, fromBase64url } from '../apps/web/src/server/client.ts';
+import { ServerClient, ServerError, base64url, fromBase64url, deviceKeyFingerprint } from '../apps/web/src/server/client.ts';
 import type { KeyStore } from '../apps/web/src/server/client.ts';
 import { API_BASE, deviceKeyNamespace, server, validateApiBase } from '../apps/web/src/server/index.ts';
 import { getSimilarPhotos, setRepresentative, setMemberNickname, getAlbum, getPhotoBlob, getThumbnailBlob, retryProcessing, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
-import { creationOptions, requestOptions } from '../apps/web/src/server/passkey.ts';
+import { confirmPasskeyAccount, creationOptions, requestOptions, signInWithPasskey } from '../apps/web/src/server/passkey.ts';
 
 function memoryKeys() {
   let keys: CryptoKeyPair | undefined;
@@ -41,6 +41,202 @@ function mockTransport(operation: (url: URL, init: RequestInit) => Response | Pr
   };
   return { fetch, calls, get challenges() { return challenges; }, get tokens() { return tokens; } };
 }
+
+const googleCode = 'c'.repeat(43);
+const googleVerifier = 'v'.repeat(43);
+const googleLogin = { access_token: 'google-token', expires_in: 600, user_id: 'google-user', created: false };
+
+test('malformed Google error bodies preserve their HTTP status as ServerError', async () => {
+  const body = { mode: 'login' as const, return_url: 'https://app.test/', code_challenge: 'challenge', client_state: 'state' };
+  for (const data of [null, 'failure', [], { error: { reason: 'invalid' } }]) {
+    const keys = memoryKeys();
+    const client = new ServerClient({ base: 'https://example.test', store: keys.store, fetch: async () => Response.json(data, { status: 403 }) });
+    const typedFailure = (error: unknown) => error instanceof ServerError && error.status === 403 && error.message === 'HTTP 403';
+    await assert.rejects(client.startGoogleAuth(body), typedFailure);
+    await assert.rejects(client.startGoogleAuth({ ...body, mode: 'link' }, 'confirmation-token'), typedFailure);
+    await assert.rejects(client.completeGoogleAuth(googleCode, googleVerifier), typedFailure);
+    assert.equal(keys.writes, 0);
+  }
+});
+
+test('device identity snapshots hash only the canonical public JWK and represent absent identity as null', async () => {
+  assert.equal(await deviceKeyFingerprint(undefined), null);
+  const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']) as CryptoKeyPair;
+  const jwk = await crypto.subtle.exportKey('jwk', keys.publicKey);
+  const expected = base64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(JSON.stringify({ kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y }))));
+  assert.equal(await deviceKeyFingerprint(keys), expected);
+  assert.equal(await deviceKeyFingerprint(keys), expected);
+  assert.equal(expected.length, 43);
+  assert.equal(keys.privateKey.extractable, false);
+});
+
+test('Google completion rejects a changed device snapshot before sending its capability', async () => {
+  const keys = memoryKeys(); let calls = 0;
+  const client = new ServerClient({ base: 'https://example.test', store: keys.store, fetch: async () => { calls += 1; return Response.json(googleLogin); } });
+  await keys.store.put(await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']) as CryptoKeyPair);
+  const original = keys.keys;
+  await assert.rejects(client.completeGoogleAuth(googleCode, googleVerifier, undefined, null), /로그인 상태가 변경/);
+  assert.equal(calls, 0); assert.equal(keys.keys, original); assert.equal(keys.writes, 1);
+});
+
+test('Google completion preserves an identity changed by another tab during the network request', async () => {
+  const keys = memoryKeys();
+  const transport = mockTransport(async () => {
+    await keys.store.put(await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']) as CryptoKeyPair);
+    return Response.json(googleLogin);
+  });
+  const client = new ServerClient({ base: 'https://example.test', store: keys.store, fetch: transport.fetch });
+  await client.token(); const original = keys.keys;
+  const fingerprint = await deviceKeyFingerprint(original);
+  await assert.rejects(client.completeGoogleAuth(googleCode, googleVerifier, undefined, fingerprint), /로그인 상태가 변경/);
+  assert.notEqual(keys.keys, original); assert.equal(keys.writes, 2, 'only the other tab replaced the key');
+  assert.equal(client.userId, 'user-one');
+});
+
+test('Google completion accepts an unchanged device snapshot including a new browser with no identity', async () => {
+  for (const existing of [false, true]) {
+    const keys = memoryKeys();
+    const transport = mockTransport(() => Response.json(googleLogin));
+    const client = new ServerClient({ base: 'https://example.test', store: keys.store, fetch: transport.fetch });
+    if (existing) await client.token();
+    const fingerprint = await deviceKeyFingerprint(keys.keys);
+    assert.equal(await client.completeGoogleAuth(googleCode, googleVerifier, undefined, fingerprint), 'google-user');
+    assert.equal(client.userId, 'google-user'); assert.equal(keys.writes, existing ? 2 : 1);
+  }
+});
+
+test('Google start is public and lazy for login, and uses only the exact API endpoint for link bearers', async () => {
+  const keys = memoryKeys();
+  const transport = mockTransport(() => Response.json({ authorization_url: 'https://accounts.google.com/o/oauth2/v2/auth', expires_in: 600 }));
+  const client = new ServerClient({ base: 'https://example.test', store: keys.store, fetch: transport.fetch });
+  const body = { mode: 'login' as const, return_url: 'https://app.test/', code_challenge: 'challenge', client_state: 'state' };
+  await client.startGoogleAuth(body);
+  await client.startGoogleAuth({ ...body, mode: 'link' }, 'confirmed-passkey-token');
+  assert.equal(keys.reads, 0); assert.equal(keys.writes, 0);
+  assert.equal(transport.calls.length, 2);
+  assert.equal(new Headers(transport.calls[0]!.init.headers).has('authorization'), false);
+  assert.equal(new Headers(transport.calls[1]!.init.headers).get('authorization'), 'Bearer confirmed-passkey-token');
+  for (const call of transport.calls) {
+    assert.equal(call.url, 'https://example.test/auth/google/start');
+    assert.equal(call.init.redirect, 'error'); assert.equal(call.init.credentials, 'omit');
+    assert.equal(call.init.cache, 'no-store'); assert.equal(call.init.referrerPolicy, 'no-referrer');
+  }
+  await client.startGoogleAuth({ ...body, mode: 'link' });
+  assert.equal(new Headers(transport.calls.at(-1)!.init.headers).get('authorization'), 'Bearer token-1');
+  const denied = new ServerClient({ base: 'https://example.test', store: keys.store, fetch: async () => Response.json({ error: 'recent passkey required' }, { status: 403 }) });
+  await assert.rejects(denied.startGoogleAuth({ ...body, mode: 'link' }, 'confirmation'), error => error instanceof ServerError && error.status === 403 && error.message === 'recent passkey required');
+});
+
+test('Google completion signs its own proof and persists only the accepted fresh device key, never a JWT', async () => {
+  const keys = memoryKeys();
+  const transport = mockTransport(async (url, init) => {
+    assert.equal(url.pathname, '/auth/google/complete');
+    assert.equal(new Headers(init.headers).has('authorization'), false);
+    assert.equal(keys.keys, originalKey, 'old key stays intact until acceptance');
+    const body = JSON.parse(String(init.body)) as { code: string; verifier: string; public_key: JsonWebKey; signature: string };
+    assert.deepEqual(Object.keys(body.public_key).sort(), ['crv', 'kty', 'x', 'y']);
+    const publicKey = await crypto.subtle.importKey('jwk', body.public_key, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+    assert.equal(await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, publicKey, fromBase64url(body.signature) as Uint8Array<ArrayBuffer>, new TextEncoder().encode(`mlhops-google-complete-v1:${googleCode}:${googleVerifier}`)), true);
+    return Response.json(googleLogin);
+  });
+  const client = new ServerClient({ base: 'https://example.test', store: keys.store, fetch: transport.fetch });
+  await client.token(); const originalKey = keys.keys;
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, get() { throw new Error('no persistent JWT'); } });
+  try {
+    assert.equal(await client.completeGoogleAuth(googleCode, googleVerifier), 'google-user');
+    assert.equal(await client.token(), 'google-token');
+    assert.notEqual(keys.keys, originalKey); assert.equal(keys.writes, 2);
+    assert.equal(keys.keys?.privateKey.extractable, false);
+    assert.equal(client.userId, 'google-user');
+    assert.equal(transport.calls.some(call => call.url.endsWith('/auth/link')), false);
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor); else Reflect.deleteProperty(globalThis, 'localStorage');
+  }
+});
+
+test('Google completion rejects malformed inputs before touching identity or network', async () => {
+  const keys = memoryKeys(); let calls = 0;
+  const client = new ServerClient({ base: 'https://example.test', store: keys.store, fetch: async () => { calls += 1; return Response.json(googleLogin); } });
+  for (const [code, verifier] of [['', googleVerifier], [googleCode, 'short'], [googleCode, '+'.repeat(43)], ['c'.repeat(44), googleVerifier]]) {
+    await assert.rejects(client.completeGoogleAuth(code!, verifier!), ServerError);
+  }
+  assert.equal(keys.reads, 0); assert.equal(keys.writes, 0); assert.equal(calls, 0);
+});
+
+test('failed, replayed, malformed or wrong-account Google completion preserves the old identity and session', async () => {
+  const keys = memoryKeys(); let response = Response.json({ error: 'completion expired or used' }, { status: 400 });
+  const transport = mockTransport(() => response);
+  const client = new ServerClient({ base: 'https://example.test', store: keys.store, fetch: transport.fetch });
+  await client.token(); const original = keys.keys;
+  await assert.rejects(client.completeGoogleAuth(googleCode, googleVerifier), error => error instanceof ServerError && error.status === 400);
+  for (const value of [null, {}, { ...googleLogin, expires_in: 0 }, { ...googleLogin, expires_in: 86_401 }, { ...googleLogin, access_token: 'bad\ntoken' }, { ...googleLogin, created: 'yes' }]) {
+    response = Response.json(value);
+    await assert.rejects(client.completeGoogleAuth(googleCode, googleVerifier), error => error instanceof ServerError && error.status === 502);
+  }
+  response = Response.json(googleLogin);
+  await assert.rejects(client.completeGoogleAuth(googleCode, googleVerifier, 'user-one'), error => error instanceof ServerError && error.status === 403);
+  assert.equal(keys.keys, original); assert.equal(keys.writes, 1);
+  assert.equal(client.userId, 'user-one'); assert.equal(await client.token(), 'token-1');
+});
+
+test('session reset cancels in-flight Google adoption before any persistent identity write', async () => {
+  const keys = memoryKeys();
+  let release!: (response: Response) => void;
+  let started!: () => void;
+  const received = new Promise<void>(resolve => { started = resolve; });
+  const transport = mockTransport(() => { started(); return new Promise<Response>(resolve => { release = resolve; }); });
+  const client = new ServerClient({ base: 'https://example.test', store: keys.store, fetch: transport.fetch });
+  await client.token(); const original = keys.keys;
+  const pending = client.completeGoogleAuth(googleCode, googleVerifier);
+  await received;
+  await assert.rejects(client.completeGoogleAuth(googleCode, googleVerifier), /이미 진행/);
+  client.resetSession(); release(Response.json(googleLogin));
+  await assert.rejects(pending, /로그인 상태가 변경/);
+  assert.equal(client.userId, undefined); assert.equal(keys.keys, original); assert.equal(keys.writes, 1);
+});
+
+test('an old device login response cannot replace a successful Google session', async () => {
+  const keys = memoryKeys();
+  let release!: (response: Response) => void;
+  let started!: () => void;
+  const received = new Promise<void>(resolve => { started = resolve; });
+  const client = new ServerClient({ base: 'https://example.test', store: keys.store, fetch: async (input) => {
+    const path = new URL(String(input)).pathname;
+    if (path === '/auth/challenge') return Response.json({ challenge: 'old-challenge' });
+    if (path === '/auth/token') { started(); return new Promise<Response>(resolve => { release = resolve; }); }
+    assert.equal(path, '/auth/google/complete'); return Response.json(googleLogin);
+  } });
+  const old = client.token(); const rejected = assert.rejects(old, /로그인 상태가 변경/);
+  await received;
+  await client.completeGoogleAuth(googleCode, googleVerifier);
+  release(Response.json({ access_token: 'old-token', expires_in: 600, user_id: 'old-user' }));
+  await rejected;
+  assert.equal(client.userId, 'google-user'); assert.equal(await client.token(), 'google-token');
+});
+
+test('passkey confirmation checks the account without adoption, while ordinary passkey login still adopts', async () => {
+  const publicPost = server.postPublic; const adopt = server.adoptAccount;
+  const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  let adoptions = 0;
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { PublicKeyCredential: class {} } });
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { credentials: { create() {}, async get() {
+    return { rawId: new ArrayBuffer(1), response: { clientDataJSON: new ArrayBuffer(1), authenticatorData: new ArrayBuffer(1), signature: new ArrayBuffer(1), userHandle: null } };
+  } } } });
+  server.postPublic = async <T>(path: string): Promise<T> => (path.endsWith('/options') ? { challenge: 'YQ', rpId: 'example.test', timeoutMs: 120000 } : googleLogin) as T;
+  server.adoptAccount = async () => { adoptions += 1; };
+  try {
+    await assert.rejects(confirmPasskeyAccount('other-user'), error => error instanceof ServerError && error.status === 403);
+    assert.deepEqual(await confirmPasskeyAccount('google-user'), googleLogin);
+    assert.equal(adoptions, 0);
+    assert.equal(await signInWithPasskey(), 'google-user'); assert.equal(adoptions, 1);
+  } finally {
+    server.postPublic = publicPost; server.adoptAccount = adopt;
+    if (windowDescriptor) Object.defineProperty(globalThis, 'window', windowDescriptor); else Reflect.deleteProperty(globalThis, 'window');
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor); else Reflect.deleteProperty(globalThis, 'navigator');
+  }
+});
 
 test('constructing a client is lazy and concurrent token requests share one device-key sign-in', async () => {
   const keys = memoryKeys();

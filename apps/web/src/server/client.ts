@@ -54,6 +54,19 @@ export function base64url(bytes: ArrayBuffer | Uint8Array): string {
   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
+/** Stable public identity snapshot; never creates or exports a private key. */
+export async function deviceKeyFingerprint(keys: CryptoKeyPair | undefined, subtle: SubtleCrypto = globalThis.crypto.subtle): Promise<string | null> {
+  if (!keys) return null
+  const jwk = await subtle.exportKey('jwk', keys.publicKey)
+  const canonical = JSON.stringify({ kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y })
+  return base64url(await subtle.digest('SHA-256', new TextEncoder().encode(canonical)))
+}
+
+function responseError(data: unknown, status: number): ServerError {
+  const error = data && typeof data === 'object' && 'error' in data ? data.error : undefined
+  return new ServerError(status, typeof error === 'string' ? error : `HTTP ${status}`)
+}
+
 export class ServerClient {
   private session?: Session
   private pending?: Promise<Session>
@@ -136,9 +149,9 @@ export class ServerClient {
       headers: body === undefined ? undefined : { 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
     })
-    const data = await res.json().catch(() => ({})) as T & { error?: string }
-    if (!res.ok) throw new ServerError(res.status, data.error ?? `HTTP ${res.status}`)
-    return data
+    const data: unknown = await res.json().catch(() => ({}))
+    if (!res.ok) throw responseError(data, res.status)
+    return data as T
   }
 
   private async signIn(): Promise<Session> {
@@ -215,6 +228,73 @@ export class ServerClient {
     return this.postJson<T>(path, body)
   }
 
+  async startGoogleAuth(body: { mode: 'login' | 'link'; return_url: string; code_challenge: string; client_state: string }, confirmationToken?: string): Promise<{ authorization_url: string; expires_in: number }> {
+    if (body.mode === 'login') return this.postJson('/auth/google/start', body)
+    const init = { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+    const generation = this.generation
+    const res = confirmationToken === undefined
+      ? await this.request('/auth/google/start', init)
+      : await this.send('/auth/google/start', { ...init, headers: { ...init.headers, authorization: `Bearer ${confirmationToken}` } })
+    this.checkGeneration(generation)
+    const data = await res.json().catch(() => ({})) as { authorization_url: string; expires_in: number; error?: string }
+    this.checkGeneration(generation)
+    if (!res.ok) throw responseError(data, res.status)
+    return data
+  }
+
+  /** Google's one-time capability binds a fresh device key without passkey-only /auth/link. */
+  async completeGoogleAuth(code: string, verifier: string, expectedUserId?: string, expectedDeviceFingerprint?: string | null): Promise<string> {
+    if (!/^[A-Za-z0-9_-]{43}$/.test(code) || !/^[A-Za-z0-9_-]{43}$/.test(verifier)) {
+      throw new ServerError(0, '올바르지 않은 Google 로그인 요청이에요.')
+    }
+    if (this.adopting) throw new ServerError(0, '계정 연결이 이미 진행 중이에요.')
+    const generation = ++this.generation
+    this.pending = undefined
+    const completing = this.completeGoogleAccount(code, verifier, expectedUserId, expectedDeviceFingerprint, generation)
+    const adopting = completing.then(() => undefined)
+    this.adopting = adopting
+    // Observe the lock's rejection even when no token request is waiting on it.
+    void adopting.catch(() => undefined)
+    try { return await completing } finally { if (this.adopting === adopting) this.adopting = undefined }
+  }
+
+  private async checkDeviceFingerprint(expected: string | null | undefined): Promise<void> {
+    if (expected === undefined) return
+    if (await deviceKeyFingerprint(await this.opts.store.get(), this.subtle) !== expected) {
+      throw new ServerError(0, '로그인 상태가 변경됐어요. 다시 연결해 주세요.')
+    }
+  }
+
+  private async completeGoogleAccount(code: string, verifier: string, expectedUserId: string | undefined, expectedDeviceFingerprint: string | null | undefined, generation: number): Promise<string> {
+    await this.pendingKeys
+    this.checkGeneration(generation)
+    const keys = await this.subtle.generateKey(ECDSA, false, ['sign', 'verify']) as CryptoKeyPair
+    const signature = await this.subtle.sign(SIGN, keys.privateKey, new TextEncoder().encode(`mlhops-google-complete-v1:${code}:${verifier}`))
+    const jwk = await this.subtle.exportKey('jwk', keys.publicKey)
+    await this.checkDeviceFingerprint(expectedDeviceFingerprint)
+    this.checkGeneration(generation)
+    const data = await this.postJson<unknown>('/auth/google/complete', {
+      code, verifier, public_key: { kty: jwk.kty, crv: jwk.crv, x: jwk.x, y: jwk.y }, signature: base64url(signature),
+    })
+    this.checkGeneration(generation)
+    if (!data || typeof data !== 'object') throw new ServerError(502, '올바르지 않은 로그인 응답이에요.')
+    const login = data as { access_token?: unknown; user_id?: unknown; expires_in?: unknown; created?: unknown }
+    if (typeof login.access_token !== 'string' || !/^[\x21-\x7e]{1,16384}$/.test(login.access_token)
+      || typeof login.user_id !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(login.user_id)
+      || typeof login.expires_in !== 'number' || !Number.isFinite(login.expires_in) || login.expires_in <= 0 || login.expires_in > 86_400
+      || (login.created !== undefined && typeof login.created !== 'boolean')) {
+      throw new ServerError(502, '올바르지 않은 로그인 응답이에요.')
+    }
+    if (expectedUserId !== undefined && login.user_id !== expectedUserId) throw new ServerError(403, '현재 계정의 로그인 수단으로 확인해 주세요.')
+    await this.checkDeviceFingerprint(expectedDeviceFingerprint)
+    this.checkGeneration(generation)
+    await this.opts.store.put(keys)
+    this.checkGeneration(generation)
+    const margin = Math.min(60, login.expires_in / 2)
+    this.session = { token: login.access_token, userId: login.user_id, refreshAt: this.now() + (login.expires_in - margin) * 1000 }
+    return login.user_id
+  }
+
   /**
    * 다른 곳(패스키)으로 로그인한 계정을 이 기기의 계정으로 삼는다. 새 기기 키를 만들어 그 계정에
    * 연결한 뒤에야 저장해 두므로, 연결에 실패하면 이 기기의 원래 계정이 그대로 남는다.
@@ -247,8 +327,8 @@ export class ServerClient {
       }),
     })
     if (res.status !== 201 && res.status !== 200) {
-      const data = await res.json().catch(() => ({})) as { error?: string }
-      throw new ServerError(res.status, data.error ?? `HTTP ${res.status}`)
+      const data: unknown = await res.json().catch(() => ({}))
+      throw responseError(data, res.status)
     }
     this.checkGeneration(generation)
     await this.opts.store.put(keys)

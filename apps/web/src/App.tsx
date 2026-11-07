@@ -4,6 +4,8 @@ import * as sharedApi from './server/api';
 import { ApprovalRequired } from './server/api';
 import type { Album, SharedMember, SimilarPhotos } from './server/api';
 import { registerPasskey, signInWithPasskey, passkeySupported } from './server/passkey';
+import { beginGoogleAuth, GOOGLE_LOGIN_ENABLED } from './server/google';
+import googleSignInIcon from './assets/google-sign-in.svg';
 import type { ChangeEvent, DragEvent, ReactNode } from 'react';
 import { server, ServerError } from './server/index';
 import { createPhotoArchive, validateArchiveSize, MAX_ARCHIVE_BYTES } from './archive';
@@ -212,7 +214,7 @@ function Comparison({ photos, selected, selectedCount, busy, initialPage, onSele
   </Modal>;
 }
 
-export default function App() {
+export default function App({ initialAuthError = '' }: { initialAuthError?: string }) {
   const [preferences] = useState(loadPreferences);
   const [selectionMode, setSelectionMode] = useState(false);
   const [maxColumns, setMaxColumns] = useState(gridColumnLimit);
@@ -247,7 +249,7 @@ export default function App() {
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const [error, setError] = useState(initialAuthError);
   const [notice, setNotice] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [viewerId, setViewerId] = useState<string | null>(null);
@@ -325,7 +327,7 @@ export default function App() {
     const epoch = sourceEpoch.current;
     void (async () => {
       try {
-        if (localStorage.getItem(RESUME_KEY) !== '1' || !await server.hasIdentity()) return;
+        if (initialAuthError || localStorage.getItem(RESUME_KEY) !== '1' || !await server.hasIdentity()) return;
         const result = await sharedApi.listAlbums();
         if (active && epoch === sourceEpoch.current) { sourceEpoch.current += 1; setPhotos([]); setRemote({ ...result, album: null, members: [] }); }
       } catch (reason) {
@@ -335,7 +337,7 @@ export default function App() {
       }
     })();
     return () => { active = false; };
-  }, []);
+  }, [initialAuthError]);
 
   const approvalDenied = useCallback((reason: ApprovalRequired) => {
     sourceEpoch.current += 1;
@@ -535,6 +537,15 @@ export default function App() {
     clearComparison();
     setSelectionMode(false); setSelected(new Set()); setViewerId(null); setDownloadIds(null); setInviteLink(''); setNotice(''); setCopied(false); setQueuedFiles([]); setProgress(null);
   }, [clearComparison]);
+  function googleButton(link = false) {
+    if (!GOOGLE_LOGIN_ENABLED) return null;
+    return <button className="icon-button google-auth" aria-label={link ? 'Google 연결' : 'Google로 로그인'} disabled={busy || loading} onClick={() => {
+      void mutate(async () => {
+        await beginGoogleAuth(link ? remote?.userId : undefined, inviteToken);
+        return photos;
+      });
+    }}><img src={googleSignInIcon} width="40" height="40" alt="" /></button>;
+  }
   async function connectShared(passkey = false) {
     if (loading) return;
     await mutate(async () => {
@@ -726,7 +737,7 @@ export default function App() {
       </div>{(localMode || remote?.album) && <button className="button primary" onClick={() => fileInput.current?.click()} disabled={busy || loading}><Icon name="plus" />올리기</button>}</section>
       {!remote && !localMode ? <section className="entry-surface" aria-label="로그인">
         {loading ? <span className="loading-dot" aria-label="불러오는 중" /> : <Icon name={approvalCode !== null ? 'lock' : 'layers'} size={64} />}
-        <div className="entry-actions"><button className="button primary" disabled={busy || loading || !passkeySupported()} onClick={() => void connectShared(true)}>로그인</button><button className="button secondary" disabled={busy || loading} onClick={() => void connectShared()}>시작</button></div>
+        <div className="entry-actions">{googleButton()}<button className="button primary" disabled={busy || loading || !passkeySupported()} onClick={() => void connectShared(true)}>로그인</button><button className="button secondary" disabled={busy || loading} onClick={() => void connectShared()}>시작</button></div>
         <button className="text-button" disabled={busy} onClick={() => void returnLocal()}>기기 보관함</button>{errorControl()}
       </section> : remote && !remote.album ? <section aria-label="여행 보관함 목록">
         <div className="list-actions"><button className="button primary" disabled={busy} onClick={openManager}><Icon name="plus" />만들기</button><button className="button secondary" disabled={busy} onClick={openManager}>참여</button><button className="icon-button" aria-label="보관함 목록 새로고침" disabled={busy} onClick={() => void connectShared()}><Icon name="retry" /></button></div>
@@ -758,7 +769,7 @@ export default function App() {
       <div className="download-list">{(normalizedDownloadIds ?? []).map(id => photos.find(photo => photo.id === id)).filter((photo): photo is Photo => !!photo).map(photo => <div key={photo.id} className="download-item"><div className="download-thumb"><Preview photo={photo} /></div><div className="download-item-info"><strong>{photo.name}</strong><small>{formatBytes(photo.size)}</small><span role="img" aria-label={photo.receivedBy.includes(member) ? '받았음 확인' : photo.requestedBy.includes(member) ? '다운로드 요청됨' : '아직 요청하지 않음'}><Icon name={photo.receivedBy.includes(member) ? 'check' : photo.requestedBy.includes(member) ? 'download' : 'image'} size={16} /></span></div><button className="icon-button" aria-label={`${photo.name} 다운로드 선택 해제`} disabled={busy} onClick={() => setDownloadIds(current => current?.filter(id => representativeDownloadIds([id], stacks)[0] !== photo.id) ?? null)}><Icon name="close" /></button><div className="receipt-actions">{photo.requestedBy.includes(member) && <><button className="icon-button" disabled={busy} aria-label="받았음 확인" aria-pressed={photo.receivedBy.includes(member)} onClick={() => void mutate(() => downloadState([photo.id], photo.receivedBy.includes(member) ? 'reset' : 'received'))}><Icon name="check" /></button><button className="icon-button" disabled={busy} aria-label="기록 되돌리기" onClick={() => void mutate(() => downloadState([photo.id], 'reset'))}><Icon name="retry" /></button></>}</div><button className="icon-button outlined" disabled={busy || !downloadReady} aria-label={`${photo.name} 원본 다운로드`} onClick={() => void download(photo)}><Icon name="download" /></button></div>)}</div></Modal>}
     {managerOpen && <Modal label="공유보관함 관리" onClose={dismissManager} className="download-dialog shared-dialog"><header className="dialog-header"><h2>{incomingInvite ? '참여' : '보관함'}</h2><button className="icon-button" disabled={busy} aria-label="공유보관함 관리 닫기" onClick={dismissManager}><Icon name="close" /></button></header>
       {!incomingInvite && errorControl()}{!remote ? <div className="connect-actions">{incomingInvite && errorControl()}{approvalCode !== null && <section className="approval-pending" aria-label="계정 승인 대기"><Icon name="lock" size={40} /><output aria-label="계정 코드">{approvalCode}</output><button className="icon-button" disabled={busy || loading} aria-label="새로고침" onClick={() => void connectShared()}><Icon name="retry" /></button></section>}
-        <button className="button primary" disabled={busy || loading || !passkeySupported()} onClick={() => void connectShared(true)}>로그인</button><button className="button secondary" disabled={busy || loading} onClick={() => void connectShared()}>시작</button>
+        {googleButton()}<button className="button primary" disabled={busy || loading || !passkeySupported()} onClick={() => void connectShared(true)}>로그인</button><button className="button secondary" disabled={busy || loading} onClick={() => void connectShared()}>시작</button>
         {approvalCode !== null && <button className="button secondary" disabled={busy || !passkeySupported()} onClick={() => void mutate(async () => { await registerPasskey(); setPasskeyRegistered(true); return []; }, '패스키 등록 완료')}>{passkeyRegistered ? <Icon name="check" /> : <Icon name="lock" />}패스키 등록</button>}
         <button className="text-button" disabled={busy} onClick={() => void returnLocal()}>기기 보관함</button>
       </div> : incomingInvite ? <section aria-label="초대 참여" aria-busy={busy}>
@@ -773,7 +784,7 @@ export default function App() {
         <form className="shared-form" onSubmit={event => { event.preventDefault(); void joinSharedAlbum(); }}><label htmlFor="invite-token">초대 코드</label><input id="invite-token" aria-label="초대 코드" value={inviteToken} onChange={event => setInviteToken(event.target.value)} maxLength={2048} required disabled={busy} aria-invalid={!!error && !!inviteToken} /><button className="button secondary" disabled={busy || !inviteToken.trim()}>참여</button></form>
         {inviteLink && <div className="shared-form"><label htmlFor="share-link">초대 링크</label><input id="share-link" aria-label="초대 링크" value={inviteLink} readOnly onFocus={event => event.target.select()} /><time>{new Date(inviteExpires).toLocaleString('ko-KR')}</time><button className="button secondary" aria-label="초대 링크 복사" onClick={async () => { try { await navigator.clipboard.writeText(inviteLink); setCopied(true); } catch { setCopied(false); document.getElementById('share-link')?.focus(); } }}><Icon name={copied ? 'check' : 'copy'} />복사</button></div>}
         {remote.album && <form className="member-name-form" onSubmit={event => { event.preventDefault(); void saveNickname(); }}><label htmlFor="own-nickname">내 닉네임<input id="own-nickname" aria-label="내 닉네임" value={nickname} maxLength={24} required disabled={busy} onChange={event => setNickname(event.target.value)} /></label><button className="button secondary" disabled={busy || !nickname.trim()}>저장</button></form>}
-        <div className="shared-form"><button className="button secondary" disabled={busy || !passkeySupported()} onClick={() => void mutate(async () => { await registerPasskey(); setPasskeyRegistered(true); return photos; }, '패스키 등록 완료')}>{passkeyRegistered ? <Icon name="check" /> : <Icon name="lock" />}패스키 등록</button><button className="text-button" disabled={busy} onClick={() => void returnLocal()}>기기 보관함</button></div>
+        <div className="shared-form">{googleButton(true)}<button className="button secondary" disabled={busy || !passkeySupported()} onClick={() => void mutate(async () => { await registerPasskey(); setPasskeyRegistered(true); return photos; }, '패스키 등록 완료')}>{passkeyRegistered ? <Icon name="check" /> : <Icon name="lock" />}패스키 등록</button><button className="text-button" disabled={busy} onClick={() => void returnLocal()}>기기 보관함</button></div>
       </>}
     </Modal>}
   </div></ApprovalContext.Provider>;

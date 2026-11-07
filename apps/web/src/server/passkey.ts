@@ -117,15 +117,23 @@ export async function passkeys(): Promise<Array<{ createdAt: string; lastUsedAt:
   return (await res.json() as { passkeys: Array<{ createdAt: string; lastUsedAt: string }> }).passkeys
 }
 
-/**
- * 패스키로 계정을 찾아 이 기기를 그 계정에 연결한다. 끝나면 이 기기는 그 계정으로 로그인돼 있고,
- * 다음부터는 Face ID 없이 기기 키로 들어간다.
- */
-export async function signInWithPasskey(): Promise<string> {
+async function passkeyLogin(): Promise<PasskeyLogin> {
   const options = await server.postPublic<LoginOptions>('/auth/passkey/login/options')
   const cred = await webauthn<{ rawId: ArrayBuffer; response: AuthenticatorAssertionResponse }>(
     () => navigator.credentials.get({ publicKey: requestOptions(options) }))
-  const login = await server.postPublic<PasskeyLogin>('/auth/passkey/login', assertionBody(cred))
+  return server.postPublic<PasskeyLogin>('/auth/passkey/login', assertionBody(cred))
+}
+
+/** Confirm the current account without changing this browser's device identity. */
+export async function confirmPasskeyAccount(expectedUserId: string): Promise<PasskeyLogin> {
+  const login = await passkeyLogin()
+  if (login.user_id !== expectedUserId) throw new ServerError(403, '현재 계정의 패스키로 확인해 주세요.')
+  return login
+}
+
+/** 패스키 계정에 새 기기 키를 연결하고, 다음부터는 기기 키로 로그인한다. */
+export async function signInWithPasskey(): Promise<string> {
+  const login = await passkeyLogin()
   await server.adoptAccount(login)
   return login.user_id
 }
