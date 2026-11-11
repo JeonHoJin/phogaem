@@ -211,9 +211,9 @@ test('late events from an old picker cannot cancel or replace a new album select
 
 test('identical video uploads stay separate and never load image previews or appear as duplicates', async ({ page }) => {
   const model = await openShared(page);
-  await expect(input(page)).toHaveAttribute('accept', /video\/mp4/);
-  await expect(input(page)).toHaveAttribute('accept', /video\/quicktime/);
-  await expect(input(page)).toHaveAttribute('accept', /video\/webm/);
+  // WebKit's current-representation path recognizes the generic image UTI.
+  // Actual supported formats and size limits remain enforced after selection.
+  await expect(input(page)).toHaveAttribute('accept', 'image/*,video/*');
   await input(page).setInputFiles([
     { name: 'first.mp4', mimeType: 'video/mp4', buffer: mp4 },
     { name: 'second.mp4', mimeType: 'video/mp4', buffer: mp4 },
