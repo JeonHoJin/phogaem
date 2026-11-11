@@ -680,7 +680,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     }
     await mutate(async () => {
       const result = await sharedApi.createInvite(remote.album!.id);
-      setInviteLink(inviteShareUrl(result.token)); setInviteExpires(result.expiresAt); setManagerView('invite'); setManagerOpen(true);
+      setInviteLink(inviteShareUrl(result.token)); setInviteExpires(result.expiresAt); setCopied(false); setManagerView('invite'); setManagerOpen(true);
       return photos;
     });
   }
