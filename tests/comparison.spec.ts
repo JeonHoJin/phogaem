@@ -167,7 +167,7 @@ for (const trigger of ['비교', '중복']) test(`a delayed ${trigger} result ca
     if (trigger === '중복') await page.getByRole('button', { name: '새로고침', exact: true }).click();
     await page.getByRole('button', { name: trigger, exact: true }).click();
     await expect.poll(() => model.similarCalls).toBe(2);
-    await page.getByRole('button', { name: '보관함', exact: true }).click();
+    await page.getByRole('button', { name: '보관함 목록', exact: true }).click();
     await page.getByRole('button', { name: '계정', exact: true }).click();
     await page.getByRole('button', { name: '기기 보관함', exact: true }).click();
     await expect(page.getByRole('heading', { name: '기기 보관함', exact: true })).toBeVisible();

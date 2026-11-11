@@ -1,9 +1,9 @@
 # Design
 
 ## Source of truth
-Status: Active. Date: 2026-11-05. Surface: Phogaem shared travel library, photo collection/download and large-screen viewing.
+Status: Active. Date: 2026-11-11. Surface: Phogaem shared travel library, photo collection/download and large-screen viewing.
 
-This file defines the experience implemented in the current working version; publishing follows the verified Pages workflow. Evidence reviewed: README.md, docs/plan.md, docs/approval.md, apps/web/src/App.tsx, existing styles and browser scenarios; the user's explicit requirement is zero explanatory or guidance copy, including exceptional states. Existing implementation includes local-first entry, explanatory paragraphs, notices and a shared-library manager; these are migration inputs, not target decisions. Existing synthetic screenshot baselines are implementation references, not an approved target mockup.
+This file defines the experience implemented in the current working version; publishing follows the verified Pages workflow. Evidence reviewed: README.md, docs/plan.md, docs/approval.md, apps/web/src/App.tsx, existing styles and browser scenarios; the user's explicit requirement is zero explanatory or guidance copy, including exceptional states. Legacy migration inputs included local-first entry, explanatory paragraphs and a combined shared-library manager. The current action surfaces are separated by purpose; synthetic before/after evidence is retained under .local/ui-toolbar/. Existing synthetic screenshot baselines are implementation references, not an approved target mockup.
 
 The user journey is specified in [docs/user-flow.md](docs/user-flow.md). This file owns design rules; technical/security contracts remain in docs/architecture.md and docs/approval.md.
 
@@ -13,7 +13,7 @@ The user journey is specified in [docs/user-flow.md](docs/user-flow.md). This fi
 ## Product goals
 Collect travel originals, merge byte-identical duplicates, select wanted photos and download them; enjoy photos together on a large screen. Success means participants can complete these jobs without reading instructions.
 
-Private R2 storage and supervised thumbnail/Gemma processing are implemented. Manual comparison candidates use the existing analysis descriptors; they are not a production verdict that images are identical. No automatic merge/delete, best-shot verdict, deletion/retention UI or native TV app is introduced. Shared-account approval and album membership remain mandatory.
+Private R2 storage and supervised thumbnail/Gemma processing are implemented. Manual comparison candidates use the existing analysis descriptors; they are not a production verdict that images are identical. No automatic merge/delete, best-shot verdict, deletion/retention UI, automatic photo upload or native TV app is introduced. Shared-account approval and album membership remain mandatory.
 
 ## Personas and jobs
 About four travel friends: a phone user contributing photos, a returning participant collecting friends' originals, and a group viewing on a connected TV. Participants navigate real shared libraries under their own accounts. Simulated member switching and browser-only samples are development/secondary surfaces, not the normal entry experience.
@@ -27,6 +27,8 @@ Invitation links use a dedicated join surface, never the create-library form. An
 - Album: trip name, participants, upload, filters and photo grid. Selection reveals a compact download tray. Viewing and selection are distinct interactions.
 - Comparison: an explicit `비교` action loads candidate groups for the current shared album. Groups intersect the active photo filters and need at least two visible members. A comparison modal presents at most four thumbnails at a time; originals load only on explicit expansion, with paging, shared selection, larger viewing and the existing download flow. No confidence percentages or explanatory copy.
 - Viewer: contain-fit photo, previous/next, slideshow, fullscreen and close. Controls can recede during viewing and remain keyboard/touch accessible.
+- Album navigation uses a visible `보관함 목록` action and the native album selector. `친구 초대` and `보관함 설정` are bordered, labeled controls of at least 44px, separated from photo comparison/refresh/notifications in the photo tools row.
+- `새 보관함`, `초대 참여`, `친구 초대`, `보관함 설정` and `계정` each open one focused surface. Invite shows only its library context, link, sharing/copy actions and expiry. Settings shows current members and the caller’s nickname; account contains authentication and local-library actions. Reopening a still-valid locally available invite must not silently replace its token. Provide an explicit owner-only `링크 재발급` action for invalidated or deliberately replaced links.
 - Invitation/account actions are secondary controls. No shared-connection management step, storage-mode chooser or technical account explanation in the main journey.
 - Local library and synthetic samples remain explicitly separate secondary/development entry points; never present local uploads as shared. Moving existing local photos to a shared album requires a deliberate action.
 
@@ -49,6 +51,7 @@ Use consistent local SVG icons for upload, download, selection, receipt, retry, 
 Similar photos collapse into a single photo stack in the normal album grid. The shared representative appears in front, with offset cards and a numeric count behind it. Clicking the stack opens its authorized members, including members excluded by individual-photo filters; filters decide whether the representative card appears. A star control changes the shared representative. Gallery selection and every new download use one representative per stack, plus ungrouped singles. Originals remain available for explicit viewing. Do not imply the initial deterministic representative is an AI quality winner.
 
 A member without a nickname receives a focused nickname form on entry. Names are local to a library, 1–24 characters, and are stored on the server. Invited members set their own names on entry; owners supply their nickname together with the album title in the create form, saved atomically with creation. Legacy members are prompted at next entry. Names appear on uploads and member avatars; no instructional paragraphs are added.
+Use existing SVG icon style for a person-plus invitation, gear settings and layered-library navigation. Native share sheets are opened only by an explicit `공유하기` action; retain link copy when unavailable. Do not add guide text, tooltips or confirmation paragraphs.
 Reuse BrandMark, native controls, filter chips, photo cards, photo grid, selection tray and fullscreen viewer. Evolve the shared manager into library-list, sign-in, invitation and account surfaces. Add item-level upload progress/retry states, a lock/pending access surface and a receipt toggle with distinct requested/confirmed appearances.
 
 Add candidate group cards and a comparison modal using existing Preview, Modal and selection controls. Candidate loading/error/empty states use icons, numeric counts and explicit refresh/retry. Stale requests cannot restore data after source/album changes or approval denial.
@@ -103,6 +106,6 @@ Acceptance for the UI migration: traverse normal, empty, loading, failed, offlin
 - [x] Product/implementation: each member sets an album-local nickname on entry, using a field and completion action without instructional onboarding.
 - [ ] Implementation: validate batch delivery on physical mobile browsers; ZIP byte preservation and separate receipt states are covered by automated browser tests.
 - [ ] Implementation: validate whether icon/shape/action vocabulary makes pending access, deterministic rejection and unavailable previews understandable on mobile; improve the structure if testing exposes ambiguity.
-- [ ] Product: retention duration and future R2 authorization remain separate decisions, with no cloud cost introduced by this contract.
+- [ ] Product: retention duration remains a separate decision, with no new cloud cost introduced by this UI contract.
 
 The shared `중복` filter includes repeated identical-file imports and known members of similar-photo candidate groups. It fetches candidates without opening comparison, refreshes on analysis state changes, and retains AND semantics for the other active filters. Similarity never changes original bytes, exact deduplication, or receipt state.

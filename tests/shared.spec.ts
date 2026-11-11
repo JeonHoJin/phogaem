@@ -61,7 +61,7 @@ async function connectApprovedUi(page: Page) {
   const identity = await client<{ userId: string }>(page, 'identity');
   await setApproval(page, identity.userId);
   await page.getByRole('button', { name: '새로고침', exact: true }).click();
-  await page.getByRole('region', { name: '여행 보관함 목록' }).getByRole('button', { name: '만들기', exact: true }).click();
+  await page.getByRole('region', { name: '여행 보관함 목록' }).getByRole('button', { name: '새 보관함', exact: true }).click();
   await expect(page.getByLabel('보관함 이름', { exact: true })).toBeVisible();
   const manager = page.getByRole('dialog', { name: '공유보관함 관리' });
   await expect(manager.getByRole('button', { name: '만들기', exact: true })).toBeDisabled();
@@ -173,7 +173,7 @@ test('shared-library UI creates, invites, shares and downloads an original after
   await page.getByLabel('사진 파일 선택').setInputFiles({ name: 'shared-ui.png', mimeType: 'image/png', buffer: Buffer.from(imageBytes) });
   await expect(page.locator('article.photo-card')).toHaveCount(1);
   await expect(page.getByRole('img', { name: 'shared-ui.png', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '초대 링크 만들기', exact: true }).click();
+  await page.getByRole('button', { name: '친구 초대', exact: true }).click();
   const invitation = await page.getByLabel('초대 링크', { exact: true }).inputValue();
   const previewUrl = new URL(invitation);
   expect(previewUrl.origin).toBe(apiBase);
@@ -198,6 +198,8 @@ test('shared-library UI creates, invites, shares and downloads an original after
     const friend = await friendContext.newPage();
     await friend.goto('./');
     await connectApprovedUi(friend);
+    await friend.getByRole('button', { name: '공유보관함 관리 닫기', exact: true }).click();
+    await friend.getByRole('region', { name: '여행 보관함 목록' }).getByRole('button', { name: '초대 참여', exact: true }).click();
     await friend.getByLabel('초대 코드', { exact: true }).fill(invitation);
     await friend.getByRole('dialog', { name: '공유보관함 관리' }).getByRole('button', { name: '참여', exact: true }).click();
     await completeNickname(friend, '여행 친구');
@@ -214,7 +216,7 @@ test('shared-library UI creates, invites, shares and downloads an original after
     await friend.getByRole('button', { name: '다운로드 창 닫기', exact: true }).click();
     await friend.getByRole('button', { name: '받은 사진 제외', exact: true }).click();
     await expect(friend.locator('article.photo-card')).toHaveCount(0);
-    await friend.getByRole('button', { name: '보관함 관리', exact: true }).click();
+    await friend.getByRole('button', { name: '계정', exact: true }).click();
     await friend.getByRole('button', { name: '기기 보관함', exact: true }).click();
     await expect(friend.getByRole('heading', { name: '기기 보관함', exact: true })).toBeVisible();
   } finally {
@@ -268,6 +270,10 @@ test('a failed album switch keeps the previous album and its photos together unt
   await page.getByLabel('사진 파일 선택').setInputFiles({ name: 'album-a.png', mimeType: 'image/png', buffer: Buffer.from(imageBytes) });
   await expect(page.locator('article.photo-card')).toHaveCount(1);
   const albumA = await page.getByLabel('공유보관함 선택', { exact: true }).inputValue();
+  await client(page, 'create', { title: '새로운 여행 B' });
+  await page.reload();
+  await page.getByRole('button', { name: '사진이 있는 여행 A', exact: false }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(1);
   let failed = false;
   await page.route(`${apiBase}/op/phogaem-album-get/v1?*`, async route => {
     if (!failed && new URL(route.request().url()).searchParams.get('albumId') !== albumA) {
@@ -275,16 +281,12 @@ test('a failed album switch keeps the previous album and its photos together unt
       await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'synthetic unavailable' }) });
     } else await route.continue();
   });
-  await page.getByRole('button', { name: '보관함 관리', exact: true }).click();
-  await page.getByLabel('보관함 이름', { exact: true }).fill('새로운 여행 B');
-  await page.getByRole('dialog', { name: '공유보관함 관리' }).getByRole('button', { name: '만들기', exact: true }).click();
+  await page.getByLabel('공유보관함 선택', { exact: true }).selectOption({ label: '새로운 여행 B' });
   await expect.poll(() => failed).toBe(true);
   await expect(page.getByRole('heading', { name: '사진이 있는 여행 A', exact: true })).toBeVisible();
   await expect(page.getByLabel('공유보관함 선택', { exact: true })).toHaveValue(albumA);
   await expect(page.locator('article.photo-card')).toHaveCount(1);
   await expect(page.locator('article.photo-card')).toContainText('album-a.png');
-  const close = page.getByRole('button', { name: '공유보관함 관리 닫기', exact: true });
-  if (await close.isVisible()) await close.click();
   await page.unroute(`${apiBase}/op/phogaem-album-get/v1?*`);
   await page.getByLabel('공유보관함 선택', { exact: true }).selectOption({ label: '새로운 여행 B' });
   await expect(page.getByRole('dialog', { name: '닉네임 설정', exact: true })).toHaveCount(0);
@@ -362,7 +364,7 @@ test('approval gates all photo operations, invitations cannot bypass it, and rev
     const approvedWithoutRelogin = await page.request.get(`${apiBase}/op/phogaem-albums/v1`, { headers: { authorization: `Bearer ${token}` } });
     expect(approvedWithoutRelogin.status()).toBe(200);
     await page.getByRole('button', { name: '새로고침', exact: true }).click();
-    await page.getByRole('region', { name: '여행 보관함 목록' }).getByRole('button', { name: '참여', exact: true }).click();
+    await page.getByRole('region', { name: '여행 보관함 목록' }).getByRole('button', { name: '초대 참여', exact: true }).click();
     await expect(page.getByLabel('초대 코드', { exact: true })).toBeVisible();
     await page.getByLabel('초대 코드', { exact: true }).fill(invite.token);
     await page.getByRole('dialog', { name: '공유보관함 관리' }).getByRole('button', { name: '참여', exact: true }).click();

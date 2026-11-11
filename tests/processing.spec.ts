@@ -114,7 +114,7 @@ test('a delayed processing poll cannot restore an album after switching to the l
   });
   try {
     await expect.poll(() => started, { timeout: 7000 }).toBe(true);
-    await page.getByRole('button', { name: '보관함', exact: true }).click();
+    await page.getByRole('button', { name: '보관함 목록', exact: true }).click();
     await page.getByRole('button', { name: '계정', exact: true }).click();
     await page.getByRole('button', { name: '기기 보관함', exact: true }).click();
     await expect(page.getByRole('heading', { name: '기기 보관함', exact: true })).toBeVisible();
