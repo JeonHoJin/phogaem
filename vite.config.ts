@@ -25,7 +25,7 @@ export default defineConfig(({ mode }) => ({
           tag: 'meta',
           attrs: {
             'http-equiv': 'Content-Security-Policy',
-            content: `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self' ${api}; base-uri 'none'; object-src 'none'; form-action 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'`,
+            content: `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src blob:; connect-src 'self' ${api}; base-uri 'none'; object-src 'none'; form-action 'none'; frame-src 'none'; worker-src 'self'; manifest-src 'self'`,
           },
           injectTo: 'head-prepend',
         }];
