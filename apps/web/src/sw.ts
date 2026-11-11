@@ -14,7 +14,7 @@ async function deliver(data: IncomingPush): Promise<void> {
     show: message => worker.registration.showNotification(message.title, {
       body: message.body,
       icon: new URL(`${basePath}icons/icon-192.png`, worker.location.origin).href,
-      tag: `phogaem:${message.albumId}`,
+      tag: `phogaem:${message.albumId}:${message.id}`,
       data: { id: data.id, albumId: data.albumId },
     }),
   });
@@ -29,7 +29,7 @@ worker.addEventListener('push', event => {
   // Safari requires visible content for EVERY push, even during network/storage failure.
   // The fallback has no album name, nickname, count, photo or account information.
   event.waitUntil(worker.registration.showNotification('포갬', {
-    body: '새 사진', tag: notification ? `phogaem:${notification.albumId}` : 'phogaem',
+    body: '새 사진', tag: notification ? `phogaem:${notification.albumId}:${notification.id}` : 'phogaem',
     icon: new URL(`${basePath}icons/icon-192.png`, worker.location.origin).href,
     data: notification ? { id: notification.id, albumId: notification.albumId } : {},
   }).then(() => {
