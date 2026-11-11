@@ -162,6 +162,7 @@ class Stack:
         })
         self.wait_http(f"http://127.0.0.1:{core}/healthz", lambda _data: True)
         self.spawn("mlhops-sidecar-phogaem", {
+            "PHOGAEM_PUSH_ENABLED": "false",
             **shared, "MLHOPS_PHOGAEM_ADDR": f"127.0.0.1:{sidecar}",
             "MLHOPS_CORE_REGISTRY_URL": f"http://127.0.0.1:{registry}",
             "MLHOPS_DATABASE_SCHEMA": "dev_phogaem", "PHOGAEM_DATA_DIR": str(self.work / "photos"),

@@ -1,5 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { PhotoGrid } from './PhotoGrid';
+import { AlbumNotifications } from './AlbumNotifications';
+import { PUSH_ENABLED } from './server/push';
+import { notificationAlbum } from './pushPayload';
 import * as sharedApi from './server/api';
 import { ApprovalRequired } from './server/api';
 import type { Album, SharedMember, SimilarPhotos } from './server/api';
@@ -222,6 +225,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   const [columns, setColumns] = useState(() => Math.min(preferences.columns ?? (window.innerWidth < 600 ? 2 : window.innerWidth < 1100 ? 3 : 4), gridColumnLimit()));
   const [localMember, setLocalMember] = useState<MemberId>(preferences.member);
   const [remote, setRemote] = useState<{ userId: string; albums: Album[]; album: Album | null; members: SharedMember[] } | null>(null);
+  const [pendingNotificationAlbum, setPendingNotificationAlbum] = useState(() => notificationAlbum(location.hash));
   const [localMode, setLocalMode] = useState(false);
   const [queuedFiles, setQueuedFiles] = useState<File[]>([]);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
@@ -565,6 +569,26 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     if (!id) return;
     await mutate(async () => { clearTransient(); return refreshAlbum(id); }, undefined, false, true);
   }
+  useEffect(() => {
+    const acceptNotification = () => {
+      const album = notificationAlbum(location.hash);
+      if (album) setPendingNotificationAlbum(album);
+    };
+    window.addEventListener('hashchange', acceptNotification);
+    return () => window.removeEventListener('hashchange', acceptNotification);
+  }, []);
+  useEffect(() => {
+    if (!pendingNotificationAlbum || !remote?.userId || busy || loading || incomingInvite) return;
+    const id = pendingNotificationAlbum;
+    setPendingNotificationAlbum(null);
+    void mutate(async () => {
+      clearTransient();
+      const result = await refreshAlbum(id);
+      setFilters(['all']); setLocalMode(false); setManagerOpen(false);
+      if (notificationAlbum(location.hash) === id) history.replaceState(null, '', location.pathname + location.search);
+      return result;
+    }, undefined, false, true);
+  }, [pendingNotificationAlbum, remote?.userId, busy, loading, incomingInvite]);
   function openManager() {
     const today = defaultAlbumName();
     const previousSuggestion = suggestedTitle.current;
@@ -741,7 +765,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
         <div className="list-actions"><button className="button primary" disabled={busy} onClick={openManager}><Icon name="plus" />만들기</button><button className="button secondary" disabled={busy} onClick={openManager}>참여</button><button className="icon-button" aria-label="보관함 목록 새로고침" disabled={busy} onClick={() => void connectShared()}><Icon name="retry" /></button></div>
         {errorControl()}<div className="album-grid">{remote.albums.map(album => <button className="album-card" key={album.id} disabled={busy} onClick={() => void selectAlbum(album.id)}><Icon name="layers" size={36} /><strong>{album.title}</strong><time>{new Date(album.createdAt).toLocaleDateString('ko-KR')}</time></button>)}</div>
       </section> : <>
-        <div className="shared-toolbar">{remote ? <><select aria-label="공유보관함 선택" value={remote.album?.id ?? ''} disabled={busy} onChange={event => void selectAlbum(event.target.value)}>{remote.albums.map(album => <option key={album.id} value={album.id}>{album.title}</option>)}</select><div className="shared-toolbar-actions"><button className="text-button" aria-pressed={comparisonMode} disabled={busy} onClick={() => { if (comparisonMode) clearComparison(); else void loadCandidates(); }}>비교</button><button className="icon-button" aria-label="새로고침" disabled={busy} onClick={() => void selectAlbum(remote.album!.id)}><Icon name="retry" /></button><button className="text-button" aria-label="초대 링크 만들기" disabled={busy} onClick={() => void invite()}>초대</button><button className="text-button" disabled={busy} onClick={openManager}>보관함 관리</button><button className="text-button" disabled={busy} onClick={() => { sourceEpoch.current += 1; setRemote(previous => previous ? { ...previous, album: null, members: [] } : null); setPhotos([]); clearTransient(); }}>보관함</button></div></> : <><select aria-label="미리보기 사용자" value={localMember} disabled={busy} onChange={event => { setLocalMember(event.target.value); setDownloadIds(null); }}>{MEMBERS.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select><button className="text-button" disabled={busy || photos.length > 0} onClick={() => void mutate(seedDemo)}>샘플</button></>}</div>
+        <div className="shared-toolbar">{remote ? <><select aria-label="공유보관함 선택" value={remote.album?.id ?? ''} disabled={busy} onChange={event => void selectAlbum(event.target.value)}>{remote.albums.map(album => <option key={album.id} value={album.id}>{album.title}</option>)}</select><div className="shared-toolbar-actions"><button className="text-button" aria-pressed={comparisonMode} disabled={busy} onClick={() => { if (comparisonMode) clearComparison(); else void loadCandidates(); }}>비교</button><button className="icon-button" aria-label="새로고침" disabled={busy} onClick={() => void selectAlbum(remote.album!.id)}><Icon name="retry" /></button>{PUSH_ENABLED && <AlbumNotifications key={`${remote.userId}:${remote.album!.id}`} albumId={remote.album!.id} userId={remote.userId} active={!busy && !loading} onError={reason => { if (reason instanceof ApprovalRequired) approvalDenied(reason); else setError(reason instanceof Error ? reason.message : '알림 설정 실패'); }} />}<button className="text-button" aria-label="초대 링크 만들기" disabled={busy} onClick={() => void invite()}>초대</button><button className="text-button" disabled={busy} onClick={openManager}>보관함 관리</button><button className="text-button" disabled={busy} onClick={() => { sourceEpoch.current += 1; setRemote(previous => previous ? { ...previous, album: null, members: [] } : null); setPhotos([]); clearTransient(); }}>보관함</button></div></> : <><select aria-label="미리보기 사용자" value={localMember} disabled={busy} onChange={event => { setLocalMember(event.target.value); setDownloadIds(null); }}>{MEMBERS.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select><button className="text-button" disabled={busy || photos.length > 0} onClick={() => void mutate(seedDemo)}>샘플</button></>}</div>
         {!managerOpen && !downloadIds && errorControl()}
         {queuedFiles.length > 0 && <section className="upload-queue" aria-label="업로드 파일"><div className="queue-progress">{progress && <><progress value={progress.done} max={progress.total} aria-label="업로드" /><output>{progress.done}/{progress.total}</output></>}</div>{queuedFiles.map((file, index) => <div className="queue-item" key={`${index}:${file.name}`}><Icon name={error ? 'alert' : 'image'} /><span>{file.name}</span><span>{formatBytes(file.size)}</span>{!busy && <button className="icon-button" aria-label={`${file.name} 대기열에서 제거`} onClick={() => { setQueuedFiles(current => current.filter((_, i) => i !== index)); }}><Icon name="close" /></button>}</div>)}{!busy && <button className="button secondary" disabled={!queuedValid} onClick={() => void upload(queuedFiles)}>올리기</button>}</section>}
         <section className="library" aria-label="사진 보관함"><div className="library-top"><span>{photos.length}</span><button className="text-button" disabled={!pendingPhotos.length || busy} onClick={() => setDownloadIds(pendingPhotos.map(p => p.id))}><Icon name="download" size={16} />다운로드 기록 {pendingPhotos.length > 0 && <span>{pendingPhotos.length}</span>}</button></div>
