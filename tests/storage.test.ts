@@ -57,3 +57,65 @@ test('photo extensions cannot disguise active MIME and image MIME cannot disguis
     await assert.rejects(importPhotos([new File(['synthetic bytes'], name, { type })], 'me'), /지원하는 사진/);
   }
 });
+
+test('video validation accepts supported camera formats and rejects disguised or oversized files atomically', async () => {
+  const { validateFile } = await import('../apps/web/src/storage.ts');
+  for (const [name, type] of [['clip.mp4', 'video/mp4'], ['clip.MOV', 'video/quicktime'], ['clip.webm', 'video/webm'], ['clip.mov', ''], ['clip.mp4', 'application/octet-stream']]) {
+    assert.doesNotThrow(() => validateFile(new File(['synthetic video'], name!, { type })));
+  }
+  for (const [name, type] of [['clip.mp4', 'text/html'], ['clip.mov', 'image/jpeg'], ['photo.jpg', 'video/mp4'], ['clip.mp4', 'video/webm'], ['clip.html', 'video/mp4'], ['clip.mp4.exe', 'video/mp4'], ['clip.constructor', ''], ['clip.__proto__', 'application/octet-stream']]) {
+    await assert.rejects(importPhotos([new File(['valid video'], 'valid.mp4', { type: 'video/mp4' }), new File(['synthetic'], name!, { type })], 'me'), /지원하는 사진/);
+  }
+  const overLimit = new File([new Uint8Array(50 * 1024 * 1024 + 1)], 'large.mp4', { type: 'video/mp4' });
+  await assert.rejects(importPhotos([overLimit], 'me'), /최대 50MB/);
+});
+
+test('local repeated videos retain distinct records and bytes while photographs still deduplicate', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'indexedDB');
+  const records = new Map<string, import('../apps/web/src/domain.ts').Photo>();
+  const db = {
+    onversionchange: null as (() => void) | null,
+    close() {},
+    transaction() {
+      let timer: ReturnType<typeof setTimeout>;
+      const transaction = { oncomplete: null as (() => void) | null, onabort: null, error: null, objectStore: () => store };
+      const complete = () => { clearTimeout(timer); timer = setTimeout(() => transaction.oncomplete?.(), 0); };
+      const store = {
+        get(id: string) {
+          const request = { result: records.get(id), onsuccess: null as (() => void) | null };
+          queueMicrotask(() => { request.onsuccess?.(); complete(); });
+          return request;
+        },
+        getAll() { complete(); return { result: [...records.values()] }; },
+        add(photo: import('../apps/web/src/domain.ts').Photo) { assert.equal(records.has(photo.id), false); records.set(photo.id, photo); complete(); },
+        put(photo: import('../apps/web/src/domain.ts').Photo) { records.set(photo.id, photo); complete(); },
+      };
+      return transaction;
+    },
+  };
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: { open() {
+    const request = { result: db, onsuccess: null as (() => void) | null };
+    queueMicrotask(() => request.onsuccess?.());
+    return request;
+  } } });
+  try {
+    const video = new File(['identical original video'], 'trip.MOV');
+    const result = await importPhotos([video, video], 'me');
+    assert.equal(result.added, 2); assert.equal(result.duplicates, 0);
+    assert.notEqual(result.photos[0]!.id, result.photos[1]!.id);
+    assert.equal(result.photos[0]!.hash, result.photos[1]!.hash);
+    for (const item of result.photos) {
+      assert.equal(item.type, 'video/quicktime'); assert.equal(item.importCount, 1);
+      assert.equal(await item.blob!.text(), 'identical original video');
+    }
+    const image = new File(['identical photo'], 'photo.jpg', { type: 'image/jpeg' });
+    const mixed = await importPhotos([video, image, image], 'mina');
+    assert.equal(mixed.added, 2); assert.equal(mixed.duplicates, 1);
+    assert.equal(mixed.photos.filter(item => item.type === 'video/quicktime').length, 3);
+    assert.equal(mixed.photos.filter(item => item.type === 'image/jpeg').length, 1);
+  } finally {
+    db.onversionchange?.();
+    if (descriptor) Object.defineProperty(globalThis, 'indexedDB', descriptor);
+    else Reflect.deleteProperty(globalThis, 'indexedDB');
+  }
+});

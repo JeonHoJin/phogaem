@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { ServerClient, ServerError, base64url, fromBase64url, deviceKeyFingerprint } from '../apps/web/src/server/client.ts';
 import type { KeyStore } from '../apps/web/src/server/client.ts';
 import { API_BASE, deviceKeyNamespace, server, validateApiBase } from '../apps/web/src/server/index.ts';
-import { getSimilarPhotos, setRepresentative, setMemberNickname, getAlbum, getPhotoBlob, getThumbnailBlob, retryProcessing, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
+import { getSimilarPhotos, setRepresentative, setMemberNickname, getAlbum, getPhotoBlob, getThumbnailBlob, retryProcessing, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, SHARED_MAX_VIDEO_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
 import { confirmPasskeyAccount, creationOptions, requestOptions, signInWithPasskey } from '../apps/web/src/server/passkey.ts';
 
 function memoryKeys() {
@@ -931,4 +931,40 @@ test('a server-selected representative survives candidate transport', async () =
     server.op = async () => Response.json({ groups: [group], pending: 0, failed: 0, analyzed: 2 });
     assert.deepEqual((await getSimilarPhotos('album-one')).groups, [group]);
   } finally { server.op = original; }
+});
+
+
+test('shared videos preserve raw bodies, accept camera MIME fallback and remain independent uploads', async () => {
+  const originalOp = server.op;
+  const uploads: Array<{ name: string; type: string; body: Blob }> = [];
+  server.op = async (name, init) => {
+    assert.equal(name, 'phogaem-photo-upload');
+    uploads.push({ name: init!.query!.name!, type: new Headers(init!.headers).get('content-type')!, body: init!.body as File });
+    return Response.json({ added: true, photo: { id: `video-${uploads.length}` } });
+  };
+  try {
+    const video = new File(['exact video bytes'], 'trip.MOV', { type: 'application/octet-stream' });
+    const result = await uploadSharedPhotos('album', [video, video]);
+    assert.deepEqual(result, { added: 2, duplicates: 0 });
+    assert.equal(uploads.length, 2);
+    for (const upload of uploads) {
+      assert.equal(upload.name, 'trip.MOV'); assert.equal(upload.type, 'video/quicktime');
+      assert.equal(upload.body, video); assert.equal(await upload.body.text(), 'exact video bytes');
+    }
+  } finally { server.op = originalOp; }
+});
+
+test('shared video limits and MIME pairs validate the entire mixed batch before writes', async () => {
+  const originalOp = server.op;
+  let calls = 0;
+  server.op = async () => { calls += 1; return Response.json({ added: true }); };
+  try {
+    assert.doesNotThrow(() => validateSharedFiles([new File([new Uint8Array(SHARED_MAX_VIDEO_SIZE)], 'max.mp4', { type: 'video/mp4' })]));
+    const oversized = new File([new Uint8Array(SHARED_MAX_VIDEO_SIZE + 1)], 'large.webm', { type: 'video/webm' });
+    await assert.rejects(uploadSharedPhotos('album', [new File(['image'], 'one.png', { type: 'image/png' }), oversized]), /최대 20MB/);
+    for (const [name, type] of [['clip.mp4', 'image/jpeg'], ['clip.webm', 'video/mp4'], ['clip.html', 'video/quicktime'], ['clip.mov', 'text/html'], ['photo.jpg', 'video/mp4'], ['clip.constructor', ''], ['clip.__proto__', 'application/octet-stream']]) {
+      await assert.rejects(uploadSharedPhotos('album', [new File(['synthetic'], name!, { type })]), /지원하는 사진/);
+    }
+    assert.equal(calls, 0);
+  } finally { server.op = originalOp; }
 });

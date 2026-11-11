@@ -1,4 +1,4 @@
-import { hashBlob, MEMBERS } from './domain.ts';
+import { fileMediaType, hashBlob, isVideo, MEMBERS } from './domain.ts';
 import type { MemberId, Photo, PhotoFilter } from './domain.ts';
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
@@ -47,19 +47,18 @@ export function validateFile(file: File): void {
   if (file.size > MAX_FILE_SIZE) throw new Error(`${file.name}: 파일당 최대 50MB까지 올릴 수 있습니다.`);
   if (file.size === 0) throw new Error(`${file.name}: 비어 있는 파일입니다.`);
   if (/svg/i.test(file.type) || /\.svgz?$/i.test(file.name)) throw new Error(`${file.name}: SVG 파일은 업로드할 수 없습니다.`);
-  const allowedType = /^image\/(jpeg|png|webp|gif|avif|heic|heif|heic-sequence|heif-sequence)$/i.test(file.type);
-  const allowedExtension = /\.(jpe?g|png|webp|gif|avif|heic|heif)$/i.test(file.name);
-  // Empty/generic MIME is common for camera formats, but explicit non-image types
-  // and non-photo download extensions must not be disguised by the other field.
-  const unspecifiedType = !file.type || file.type.toLowerCase() === 'application/octet-stream';
-  if (!allowedExtension || (!allowedType && !unspecifiedType)) throw new Error(`${file.name}: 지원하는 사진 파일을 선택해 주세요.`);
+  if (!fileMediaType(file)) throw new Error(`${file.name}: 지원하는 사진 또는 동영상 파일을 선택해 주세요.`);
 }
 
 export async function importPhotos(files: File[], member: MemberId): Promise<{ added: number; duplicates: number; photos: Photo[] }> {
   files.forEach(validateFile);
   // Hash before opening a write transaction; asynchronous hashing would make it inactive.
-  const prepared: { file: File; hash: string }[] = [];
-  for (const file of files) prepared.push({ file, hash: await hashBlob(file) });
+  const prepared: { file: File; hash: string; type: string; id: string }[] = [];
+  for (const file of files) {
+    const type = fileMediaType(file)!;
+    const hash = await hashBlob(file);
+    prepared.push({ file, hash, type, id: isVideo({ type }) ? `video:${crypto.randomUUID()}` : `${hash}:${file.size}` });
+  }
   const db = await openDatabase();
   let added = 0;
   let duplicates = 0;
@@ -70,7 +69,7 @@ export async function importPhotos(files: File[], member: MemberId): Promise<{ a
     const next = () => {
       const item = prepared[index++];
       if (!item) return;
-      const id = `${item.hash}:${item.file.size}`;
+      const id = item.id;
       const request = store.get(id);
       request.onsuccess = () => {
         const existing = request.result as Photo | undefined;
@@ -82,7 +81,7 @@ export async function importPhotos(files: File[], member: MemberId): Promise<{ a
         } else {
           added += 1;
           store.add({
-            id, name: item.file.name, type: item.file.type, size: item.file.size,
+            id, name: item.file.name, type: item.type, size: item.file.size,
             hash: item.hash, createdAt: Date.now(), contributors: [member],
             requestedBy: [], receivedBy: [], blob: item.file, importCount: 1,
           } satisfies Photo);

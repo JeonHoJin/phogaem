@@ -21,6 +21,20 @@ export interface Photo {
   processing?: PhotoProcessing;
 }
 
+export function isVideo(photo: Pick<Photo, 'type'>): boolean {
+  return /^video\/(mp4|quicktime|webm)$/i.test(photo.type);
+}
+
+/** Resolve camera files with unspecified MIME while rejecting mismatched download extensions. */
+export function fileMediaType(file: Pick<File, 'name' | 'type'>): string | undefined {
+  const extension = file.name.split('.').at(-1)?.toLowerCase();
+  const expected = ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', avif: 'image/avif', heic: 'image/heic', heif: 'image/heif', mp4: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm' } as Record<string, string>)[extension ?? ''];
+  if (typeof expected !== 'string') return undefined;
+  const provided = file.type.toLowerCase();
+  const normalized = ({ 'image/heic-sequence': 'image/heic', 'image/heif-sequence': 'image/heif' } as Record<string, string>)[provided] ?? provided;
+  return !provided || provided === 'application/octet-stream' || normalized === expected ? expected : undefined;
+}
+
 export type PhotoFilter = 'all' | 'others' | 'mine' | 'duplicates' | 'unreceived';
 
 export const MEMBERS: { id: MemberId; name: string; color: string }[] = [
@@ -40,7 +54,7 @@ export function matchesFilters(photo: Photo, filters: PhotoFilter[], member: Mem
       case 'all': return true;
       case 'others': return !photo.contributors.includes(member);
       case 'mine': return photo.contributors.includes(member);
-      case 'duplicates': return (photo.importCount ?? photo.contributors.length) > 1 || similarIds?.has(photo.id) === true;
+      case 'duplicates': return !isVideo(photo) && ((photo.importCount ?? photo.contributors.length) > 1 || similarIds?.has(photo.id) === true);
       case 'unreceived': return !photo.receivedBy.includes(member);
       default: return false;
     }
@@ -87,7 +101,7 @@ export interface PhotoGroup { id: string; photoIds: string[]; representativeId?:
 export interface PhotoStack { id: string; representative: Photo; photos: Photo[] }
 
 export function buildPhotoStacks(photos: Photo[], groups: PhotoGroup[]): PhotoStack[] {
-  const known = new Map(photos.map(photo => [photo.id, photo]));
+  const known = new Map(photos.filter(photo => !isVideo(photo)).map(photo => [photo.id, photo]));
   const grouped = new Map<string, PhotoStack>();
   for (const group of groups) {
     const members = group.photoIds.map(id => known.get(id)).filter((photo): photo is Photo => !!photo);

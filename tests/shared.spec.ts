@@ -18,7 +18,7 @@ async function client<T>(page: Page, operation: string, payload: Record<string, 
       case 'invite': return api.createInvite(payload.albumId as string);
       case 'join': return api.joinInvite(payload.token as string, '합성 멤버');
       case 'get': return api.getAlbum(payload.albumId as string);
-      case 'upload': return api.uploadSharedPhotos(payload.albumId as string, [new File([new Uint8Array(payload.bytes as number[])], payload.name as string, { type: 'image/png' })]);
+      case 'upload': return api.uploadSharedPhotos(payload.albumId as string, [new File([new Uint8Array(payload.bytes as number[])], payload.name as string, { type: (payload.type as string) ?? 'image/png' })]);
       case 'blob': return Array.from(new Uint8Array(await (await api.getPhotoBlob(payload.albumId as string, payload.photoId as string)).arrayBuffer()));
       case 'state': return api.setSharedDownloadState(payload.albumId as string, payload.photoIds as string[], payload.state as 'requested' | 'received' | 'reset');
       case 'probe': {
@@ -656,4 +656,35 @@ test('approved invitations open directly on reload and hash change, and replaced
     await expect(guest.getByRole('dialog', { name: '공유보관함 관리' })).toHaveCount(0);
     await expect(guest.getByRole('heading', { name: '바로 참여 여행', exact: true })).toBeVisible();
   } finally { await Promise.all([ownerContext.close(), guestContext.close()]); }
+});
+
+
+test('shared videos keep independent items and original bytes without image processing', async ({ browser }) => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const bytes = Array.from(Buffer.from('00000018667479706d703432000000006d70343269736f6d', 'hex'));
+  try {
+    await page.goto('./');
+    await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
+    await approveIdentity(page);
+    const album = await client<{ id: string }>(page, 'create', { title: '영상 원본 검증' });
+    for (let index = 0; index < 2; index += 1) {
+      const result = await client<{ added: number; duplicates: number }>(page, 'upload', { albumId: album.id, name: 'synthetic.mp4', type: 'video/mp4', bytes });
+      expect(result).toMatchObject({ added: 1, duplicates: 0 });
+    }
+    const result = await client<{ photos: Array<{ id: string; type: string; processing?: unknown; importCount: number }> }>(page, 'get', { albumId: album.id });
+    expect(result.photos).toHaveLength(2);
+    expect(new Set(result.photos.map(photo => photo.id)).size).toBe(2);
+    for (const photo of result.photos) {
+      expect(photo.type).toBe('video/mp4');
+      expect(photo.processing).toBeUndefined();
+      expect(photo.importCount).toBe(1);
+      expect(await client(page, 'blob', { albumId: album.id, photoId: photo.id })).toEqual(bytes);
+    }
+    await page.getByRole('button', { name: '시작', exact: true }).click();
+    await page.getByRole('button', { name: '영상 원본 검증', exact: false }).click();
+    await expect(page.locator('article.photo-card')).toHaveCount(2);
+    await page.getByRole('button', { name: '중복', exact: true }).click();
+    await expect(page.locator('article.photo-card')).toHaveCount(0);
+  } finally { await context.close(); }
 });

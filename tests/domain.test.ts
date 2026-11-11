@@ -114,3 +114,15 @@ test('download ids collapse selected members to one representative per stack and
   assert.deepEqual(first.requestedBy, []);
   assert.deepEqual(second.receivedBy, []);
 });
+
+test('videos never match duplicate filters or collapse into photo candidate stacks', () => {
+  const video = photo({ id: 'video', type: 'video/mp4', name: 'trip.mp4', importCount: 9 });
+  const first = photo({ id: 'first' }); const second = photo({ id: 'second' });
+  assert.equal(matchesFilters(video, ['duplicates'], 'me', new Set(['video'])), false);
+  assert.equal(matchesFilters(video, ['all', 'others'], 'me'), true);
+  const stacks = buildPhotoStacks([video, first, second], [{ id: 'mixed', photoIds: ['video', 'first', 'second'], representativeId: 'video' }]);
+  assert.deepEqual(stacks.map(stack => stack.representative.id), ['video', 'first']);
+  assert.deepEqual(stacks[0]!.photos, [video]);
+  assert.deepEqual(stacks[1]!.photos, [first, second]);
+  assert.deepEqual(representativeDownloadIds(['video', 'first', 'second'], stacks), ['video', 'first']);
+});

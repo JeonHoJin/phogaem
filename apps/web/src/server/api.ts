@@ -1,4 +1,5 @@
 import { server, ServerError } from './index.ts';
+import { fileMediaType, isVideo } from '../domain.ts';
 import type { PhotoProcessing, ProcessingKind } from '../domain.ts';
 
 export interface Album { id: string; title: string; createdAt: number; ownerId?: string }
@@ -22,6 +23,7 @@ export interface SimilarPhotos { groups: SimilarGroup[]; pending: number; failed
 
 
 export const SHARED_MAX_FILE_SIZE = 16 * 1024 * 1024;
+export const SHARED_MAX_VIDEO_SIZE = 20 * 1024 * 1024;
 
 /** Account approval is enforced by the core before the sidecar is called. */
 export class ApprovalRequired extends ServerError {
@@ -113,20 +115,18 @@ export async function joinInvite(token: string, nickname?: string): Promise<Albu
 }
 
 function fileType(file: File): string {
-  if (file.type) return file.type;
-  const ext = file.name.split('.').at(-1)?.toLowerCase();
-  return ({ jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp', gif: 'image/gif', avif: 'image/avif', heic: 'image/heic', heif: 'image/heif' } as Record<string, string>)[ext ?? ''] ?? 'application/octet-stream';
+  return fileMediaType(file) ?? 'application/octet-stream';
 }
 
 export function validateSharedFiles(files: File[]): void {
   for (const file of files) {
     if (!file.size) throw new Error(`${file.name}: 비어 있는 파일이에요.`);
-    if (file.size > SHARED_MAX_FILE_SIZE) throw new Error(`${file.name}: 공유 사진은 파일당 최대 16MB까지 올릴 수 있어요.`);
+    const type = fileType(file);
+    const video = isVideo({ type });
+    if (file.size > (video ? SHARED_MAX_VIDEO_SIZE : SHARED_MAX_FILE_SIZE)) throw new Error(`${file.name}: ${video ? '동영상은 파일당 최대 20MB' : '공유 사진은 파일당 최대 16MB'}까지 올릴 수 있어요.`);
     if (/svg/i.test(file.type) || /\.svgz?$/i.test(file.name)) throw new Error(`${file.name}: SVG 파일은 올릴 수 없어요.`);
     if ([...file.name].length > 200 || [...file.name].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127 || char === '/' || char === '\\')) throw new Error('사진 파일 이름에 사용할 수 없는 문자가 있어요.');
-    if (!/^image\/(jpeg|png|webp|gif|avif|heic|heif|heic-sequence|heif-sequence)$/i.test(fileType(file)) && !/\.(jpe?g|png|webp|gif|avif|heic|heif)$/i.test(file.name)) {
-      throw new Error(`${file.name}: 지원하는 사진 파일을 선택해 주세요.`);
-    }
+    if (!fileMediaType(file)) throw new Error(`${file.name}: 지원하는 사진 또는 동영상 파일을 선택해 주세요.`);
   }
 }
 

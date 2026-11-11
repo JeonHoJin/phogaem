@@ -5,7 +5,7 @@ const localChrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrom
 
 export default defineConfig({
   testDir: './tests',
-  testMatch: ['album.spec.ts', 'processing.spec.ts', 'comparison.spec.ts', 'gestures.spec.ts', 'album-actions.spec.ts', 'upload-feedback.spec.ts', 'thumbnail-retention.spec.ts'],
+  testMatch: ['album.spec.ts', 'processing.spec.ts', 'comparison.spec.ts', 'gestures.spec.ts', 'album-actions.spec.ts', 'upload-feedback.spec.ts', 'thumbnail-retention.spec.ts', 'video-picker.spec.ts'],
   fullyParallel: false,
   workers: 1,
   timeout: 30_000,
