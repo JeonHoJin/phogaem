@@ -136,9 +136,15 @@ test('real built worker always displays a generic fallback and never upgrades a 
   await page.evaluate(async () => { await navigator.serviceWorker.register('/phogaem/sw.js', { type: 'module', scope: '/phogaem/' }); await navigator.serviceWorker.ready; });
   await expect.poll(() => registrationId).not.toBe('');
   const worker = context.serviceWorkers()[0]!;
+  await worker.evaluate(() => {
+    const scope = self as unknown as ServiceWorkerGlobalScope & { testPushEvents: number };
+    scope.testPushEvents = 0;
+    scope.addEventListener('push', () => { scope.testPushEvents += 1; });
+  });
   const notices = () => worker.evaluate(async () => (await (self as unknown as ServiceWorkerGlobalScope).registration.getNotifications()).map(n => ({ title: n.title, body: n.body, tag: n.tag })));
   const send = async (id: string) => cdp.send('ServiceWorker.deliverPushMessage', { origin: 'http://127.0.0.1:5176', registrationId, data: JSON.stringify({ id, albumId: albumA, recipientId: userA }) });
   await send(noticeId);
+  await expect.poll(() => worker.evaluate(() => (self as unknown as { testPushEvents: number }).testPushEvents)).toBe(1);
   await expect.poll(async () => (await notices()).some(n => n.title === '비공개 여행')).toBe(true);
   await page.evaluate(async () => {
     const keys = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
