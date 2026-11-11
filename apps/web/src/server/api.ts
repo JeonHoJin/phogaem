@@ -76,7 +76,14 @@ export function getAlbum(albumId: string): Promise<SharedAlbum> {
 }
 
 export async function getSimilarPhotos(albumId: string): Promise<SimilarPhotos> {
-  const value: unknown = await json('similar-get', undefined, { albumId });
+  return parseSimilarPhotos(await json('similar-get', undefined, { albumId }));
+}
+
+export async function excludeSimilarPhoto(albumId: string, groupId: string, photoId: string): Promise<SimilarPhotos> {
+  return parseSimilarPhotos(await json('similar-exclude', { albumId, groupId, photoId }));
+}
+
+function parseSimilarPhotos(value: unknown): SimilarPhotos {
   const invalid = () => { throw new ServerError(502, '비교 후보 응답을 확인하지 못했어요.'); };
   if (!value || typeof value !== 'object') return invalid();
   const data = value as Record<string, unknown>;

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { ServerClient, ServerError, base64url, fromBase64url, deviceKeyFingerprint } from '../apps/web/src/server/client.ts';
 import type { KeyStore } from '../apps/web/src/server/client.ts';
 import { API_BASE, deviceKeyNamespace, server, validateApiBase } from '../apps/web/src/server/index.ts';
-import { getSimilarPhotos, setRepresentative, setMemberNickname, getAlbum, getPhotoBlob, getThumbnailBlob, retryProcessing, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, SHARED_MAX_VIDEO_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
+import { excludeSimilarPhoto, getSimilarPhotos, setRepresentative, setMemberNickname, getAlbum, getPhotoBlob, getThumbnailBlob, retryProcessing, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, SHARED_MAX_VIDEO_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
 import { confirmPasskeyAccount, creationOptions, requestOptions, signInWithPasskey } from '../apps/web/src/server/passkey.ts';
 
 function memoryKeys() {
@@ -967,4 +967,33 @@ test('shared video limits and MIME pairs validate the entire mixed batch before 
     }
     assert.equal(calls, 0);
   } finally { server.op = originalOp; }
+});
+
+
+test('false-positive separation posts its exact album/group/photo and returns fresh validated candidates', async () => {
+  const original = server.op;
+  const updated = { groups: [{ id: 'remaining-group', photoIds: ['photo-one', 'photo-two'], representativeId: 'photo-two' }], pending: 0, failed: 0, analyzed: 3 };
+  try {
+    server.op = async (name, init) => {
+      assert.equal(name, 'phogaem-similar-exclude');
+      assert.equal(init?.method, 'POST'); assert.equal(init?.version, 'v1');
+      assert.deepEqual(JSON.parse(String(init?.body)), { albumId: 'album-one', groupId: 'old-group', photoId: 'photo-three' });
+      return Response.json(updated);
+    };
+    assert.deepEqual(await excludeSimilarPhoto('album-one', 'old-group', 'photo-three'), updated);
+  } finally { server.op = original; }
+});
+
+test('false-positive separation retains typed denial and rejects malformed candidate responses', async () => {
+  const original = server.op;
+  try {
+    server.op = async () => Response.json({ error: 'approval required' }, { status: 403 });
+    await assert.rejects(excludeSimilarPhoto('album', 'group', 'photo'), ApprovalRequired);
+    server.op = async () => Response.json({ error: 'comparison group changed' }, { status: 409 });
+    await assert.rejects(excludeSimilarPhoto('album', 'group', 'photo'), error => error instanceof ServerError && error.status === 409);
+    for (const value of [null, { groups: [], pending: -1, failed: 0, analyzed: 2 }, { groups: [{ id: 'g', photoIds: ['one', 'two'], representativeId: 'outside' }], pending: 0, failed: 0, analyzed: 2 }]) {
+      server.op = async () => Response.json(value);
+      await assert.rejects(excludeSimilarPhoto('album', 'group', 'photo'), error => error instanceof ServerError && error.status === 502);
+    }
+  } finally { server.op = original; }
 });

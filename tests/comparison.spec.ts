@@ -22,7 +22,7 @@ async function openShared(page: Page, count = 2) {
   const model = {
     photos, similarCalls: 0, similarStatus: 200, gate: null as Promise<void> | null,
     originals: [] as string[], thumbnails: [] as string[], mutations: [] as Array<{ operation: string; body: Record<string, unknown> }>,
-    groups: [] as SimilarGroup[], representativeStatus: 200, nickname: undefined as string | null | undefined,
+    groups: [] as SimilarGroup[], representativeStatus: 200, excludeStatus: 200, excludeGate: null as Promise<void> | null, nickname: undefined as string | null | undefined,
   };
   await page.route('**/auth/**', async route => {
     await route.fulfill({ json: new URL(route.request().url()).pathname.endsWith('/token')
@@ -61,6 +61,22 @@ async function openShared(page: Page, count = 2) {
         const { groupId, photoId } = request.postDataJSON() as { groupId: string; photoId: string };
         model.groups = model.groups.map(group => group.id === groupId ? { ...group, representativeId: photoId } : group);
         await route.fulfill({ json: { ok: true } });
+      }
+    } else if (operation === 'phogaem-similar-exclude') {
+      if (model.excludeGate) await model.excludeGate;
+      if (model.excludeStatus !== 200) {
+        await route.fulfill({ status: model.excludeStatus, json: { error: model.excludeStatus === 403 ? 'approval required' : 'synthetic separation failure' } });
+      } else {
+        const { groupId, photoId } = request.postDataJSON() as { groupId: string; photoId: string };
+        const group = model.groups.find(value => value.id === groupId && value.photoIds.includes(photoId));
+        if (!group) { await route.fulfill({ status: 409, json: { error: 'comparison group changed' } }); return; }
+        const remaining = group.photoIds.filter(id => id !== photoId);
+        model.groups = model.groups.filter(value => value.id !== groupId);
+        if (remaining.length >= 2) model.groups.push({
+          id: 'd'.repeat(64), photoIds: remaining,
+          representativeId: remaining.includes(group.representativeId ?? '') ? group.representativeId : remaining[0],
+        });
+        await route.fulfill({ json: { groups: model.groups, pending: 0, failed: 0, analyzed: photos.length } });
       }
     } else if (operation === 'phogaem-download-state') {
       const body = request.postDataJSON() as { photoIds: string[]; state: string };
@@ -530,4 +546,154 @@ test('download preflight blocks originals when its current representative is abs
   expect(model.originals).toEqual([]);
   expect(model.mutations).toEqual([]);
   expect(downloaded).toBe(false);
+});
+
+
+test('separating a false positive restores independent cards and stays separated after reload', async ({ page }) => {
+  const model = await openShared(page);
+  groupAll(model);
+  await page.getByRole('button', { name: '새로고침', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(1);
+  await page.getByRole('button', { name: 'photo-1.png 크게 보기', exact: true }).click();
+  const compare = page.getByRole('dialog', { name: '사진 비교', exact: true });
+  await compare.getByRole('button', { name: 'photo-2.png 중복에서 빼기', exact: true }).click();
+  await expect(compare).toHaveCount(0);
+  await expect(page.locator('article.photo-card')).toHaveCount(2);
+  await expect(page.locator('article.photo-card.photo-stack')).toHaveCount(0);
+  await page.getByRole('button', { name: '중복', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(0);
+  await page.getByRole('button', { name: '전체', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(2);
+  expect(model.mutations).toEqual([{ operation: 'phogaem-similar-exclude', body: { albumId, groupId: 'c'.repeat(64), photoId: photoId(1) } }]);
+  expect(model.originals).toEqual([]);
+  await page.reload();
+  await page.getByRole('button', { name: '비교 검증 여행', exact: false }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(2);
+  await expect(page.locator('article.photo-card.photo-stack')).toHaveCount(0);
+});
+
+test('separating one member preserves the remaining cover and downloads the separated original independently', async ({ page }) => {
+  const model = await openShared(page, 3);
+  model.groups = [{ id: 'c'.repeat(64), photoIds: model.photos.map(photo => photo.id), representativeId: photoId(1) }];
+  await page.getByRole('button', { name: '새로고침', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(1);
+  await page.getByRole('button', { name: 'photo-2.png 크게 보기', exact: true }).click();
+  const compare = page.getByRole('dialog', { name: '사진 비교', exact: true });
+  await compare.getByRole('button', { name: 'photo-3.png 중복에서 빼기', exact: true }).click();
+  await expect(compare).toBeVisible();
+  await expect(compare.getByRole('button', { name: 'photo-3.png 중복에서 빼기', exact: true })).toHaveCount(0);
+  await expect(compare.getByRole('button', { name: 'photo-2.png 대표사진', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await compare.getByRole('button', { name: '비교 닫기', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(2);
+  await expect(page.locator('article.photo-card.photo-stack')).toHaveCount(1);
+  await page.getByRole('checkbox', { name: '현재 사진 전체 선택', exact: true }).check();
+  await page.getByRole('button', { name: '선택 다운로드', exact: true }).click();
+  const downloads = page.getByRole('dialog', { name: '선택 사진 다운로드', exact: true });
+  await expect(downloads.getByRole('button', { name: /원본 다운로드$/ })).toHaveCount(2);
+  await expect(downloads.getByRole('button', { name: 'photo-1.png 원본 다운로드', exact: true })).toHaveCount(0);
+  const event = page.waitForEvent('download');
+  await downloads.getByRole('button', { name: /^일괄 다운로드/ }).click();
+  const entries = zipEntries(await readFile((await (await event).path())!));
+  expect(entries.map(entry => entry.name)).toEqual(['photo-2.png', 'photo-3.png']);
+  expect(entries.map(entry => entry.bytes)).toEqual([originalBytes(photoId(1)), originalBytes(photoId(2))]);
+  expect(model.originals).toEqual([photoId(1), photoId(2)]);
+});
+
+test('a failed separation keeps the group and retries the same photo only after the request settles', async ({ page }) => {
+  const model = await openShared(page);
+  const compare = await openComparison(page, model);
+  let release!: () => void;
+  model.excludeGate = new Promise<void>(resolve => { release = resolve; });
+  model.excludeStatus = 503;
+  try {
+    const action = compare.getByRole('button', { name: 'photo-2.png 중복에서 빼기', exact: true });
+    await action.click();
+    await expect.poll(() => model.mutations.length).toBe(1);
+    await expect(action).toBeDisabled();
+    await expect(compare.getByRole('button', { name: 'photo-1.png 크게 보기', exact: true })).toBeDisabled();
+    expect(model.groups[0]!.photoIds).toHaveLength(2);
+    release();
+    const failure = compare.getByRole('group', { name: '사진 분리 실패', exact: true });
+    await expect(failure).toBeVisible();
+    await expect(action).toBeEnabled();
+    model.excludeStatus = 200; model.excludeGate = null;
+    await failure.getByRole('button', { name: '재시도', exact: true }).click();
+    await expect(compare).toHaveCount(0);
+    await expect(page.getByLabel('비교 후보 수', { exact: true })).toHaveText('0');
+    await page.getByRole('button', { name: '비교', exact: true }).click();
+    await expect(page.locator('article.photo-card')).toHaveCount(2);
+    expect(model.mutations).toEqual(Array.from({ length: 2 }, () => ({ operation: 'phogaem-similar-exclude', body: { albumId, groupId: 'c'.repeat(64), photoId: photoId(1) } })));
+    expect(model.originals).toEqual([]);
+  } finally { release(); }
+});
+
+for (const status of [403, 409]) test(`separation failure ${status} preserves approval and stale-group boundaries`, async ({ page }) => {
+  const model = await openShared(page);
+  const compare = await openComparison(page, model);
+  model.excludeStatus = status;
+  if (status === 409) model.groups = [];
+  await compare.getByRole('button', { name: 'photo-2.png 중복에서 빼기', exact: true }).click();
+  await expect(compare).toHaveCount(0);
+  if (status === 403) {
+    await expect(page.getByRole('region', { name: '계정 승인 대기', exact: true })).toBeVisible();
+    await expect(page.locator('article.photo-card')).toHaveCount(0);
+  } else {
+    await expect(page.getByLabel('비교 후보 수', { exact: true })).toHaveText('0');
+    await page.getByRole('button', { name: '비교', exact: true }).click();
+    await expect(page.locator('article.photo-card')).toHaveCount(2);
+    await expect(page.locator('article.photo-card.photo-stack')).toHaveCount(0);
+    await expect(page.getByRole('region', { name: '계정 승인 대기', exact: true })).toHaveCount(0);
+  }
+  expect(model.originals).toEqual([]);
+});
+
+test('mobile separation of the current representative adopts the remaining cover and keeps the old cover standalone', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const model = await openShared(page, 3);
+  groupAll(model);
+  await page.getByRole('button', { name: '새로고침', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(1);
+  await page.getByRole('button', { name: 'photo-1.png 크게 보기', exact: true }).click();
+  const compare = page.getByRole('dialog', { name: '사진 비교', exact: true });
+  const action = compare.getByRole('button', { name: 'photo-1.png 중복에서 빼기', exact: true });
+  await expect(action).toHaveText('분리');
+  const bounds = await action.boundingBox();
+  expect(bounds!.width).toBeGreaterThanOrEqual(44);
+  expect(bounds!.height).toBeGreaterThanOrEqual(44);
+  await action.click();
+  await expect(compare.getByRole('button', { name: 'photo-1.png 중복에서 빼기', exact: true })).toHaveCount(0);
+  await expect(compare.getByRole('button', { name: 'photo-2.png 대표사진', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  expect(await compare.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await mkdir('.local/exclusion-verification', { recursive: true });
+  await page.screenshot({ path: '.local/exclusion-verification/mobile-representative.png' });
+  await compare.getByRole('button', { name: '비교 닫기', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(2);
+  await expect(page.locator(`article.photo-card[data-photo-id="${photoId(0)}"]`)).not.toHaveClass(/photo-stack/);
+  await expect(page.locator(`article.photo-card[data-photo-id="${photoId(1)}"]`)).toHaveClass(/photo-stack/);
+  await expect(page.locator(`article.photo-card[data-photo-id="${photoId(2)}"]`)).toHaveCount(0);
+  expect(model.originals).toEqual([]);
+});
+
+test('a separation completed after closing comparison updates the library without reopening the dialog', async ({ page }) => {
+  const model = await openShared(page, 3);
+  groupAll(model);
+  await page.getByRole('button', { name: '새로고침', exact: true }).click();
+  await expect(page.locator('article.photo-card')).toHaveCount(1);
+  await page.getByRole('button', { name: 'photo-1.png 크게 보기', exact: true }).click();
+  const compare = page.getByRole('dialog', { name: '사진 비교', exact: true });
+  let release!: () => void;
+  model.excludeGate = new Promise<void>(resolve => { release = resolve; });
+  try {
+    await compare.getByRole('button', { name: 'photo-3.png 중복에서 빼기', exact: true }).click();
+    await expect.poll(() => model.mutations.length).toBe(1);
+    await compare.getByRole('button', { name: '비교 닫기', exact: true }).click();
+    await expect(compare).toHaveCount(0);
+    release();
+    await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
+    await expect(page.locator('article.photo-card')).toHaveCount(2);
+    await expect(page.locator('article.photo-card.photo-stack')).toHaveCount(1);
+    await expect(compare).toHaveCount(0);
+    expect(model.originals).toEqual([]);
+  } finally { release(); }
 });

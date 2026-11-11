@@ -307,7 +307,7 @@ test('approval gates all photo operations, invitations cannot bypass it, and rev
     ['phogaem-invite-join', 'POST'], ['phogaem-photo-upload', 'POST'],
     ['phogaem-photo-get', 'GET'], ['phogaem-download-state', 'POST'],
     ['phogaem-thumbnail-get', 'GET'], ['phogaem-processing-retry', 'POST'], ['phogaem-similar-get', 'GET'],
-    ['phogaem-member-name-set', 'POST'], ['phogaem-representative-set', 'POST'],
+    ['phogaem-member-name-set', 'POST'], ['phogaem-representative-set', 'POST'], ['phogaem-similar-exclude', 'POST'],
     ['phogaem-push-status', 'POST'], ['phogaem-push-subscribe', 'POST'],
     ['phogaem-push-unsubscribe', 'POST'], ['phogaem-push-message', 'POST'],
   ];

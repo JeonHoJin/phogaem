@@ -210,9 +210,9 @@ function Viewer({ photos, initialId, onClose, onDownload, onNotice }: { photos: 
 }
 
 
-function Comparison({ photos, selected, selectedCount, busy, initialPage, onSelect, onView, onDownload, onClose, representativeId, onRepresentative, failure }: {
+function Comparison({ photos, selected, selectedCount, busy, initialPage, onSelect, onView, onDownload, onClose, representativeId, onRepresentative, onSeparate, failure }: {
   photos: Photo[]; selected: Set<string>; selectedCount: number; busy: boolean; initialPage: number;
-  failure?: ReactNode; representativeId?: string; onRepresentative: (id: string) => void;
+  failure?: ReactNode; representativeId?: string; onRepresentative: (id: string) => void; onSeparate: (id: string) => void;
   onSelect: (id: string) => void; onView: (id: string, page: number) => void; onDownload: () => void; onClose: () => void;
 }) {
   const [page, setPage] = useState(initialPage);
@@ -227,8 +227,8 @@ function Comparison({ photos, selected, selectedCount, busy, initialPage, onSele
     </div></header>
     {failure}
     <div className="comparison-grid" data-count={pagePhotos.length}>{pagePhotos.map(photo => <article key={photo.id} className={`comparison-photo ${selected.has(photo.id) ? 'is-selected' : ''}`}>
-      <div className="comparison-open"><Preview photo={photo} thumbnailOnly /><button className="icon-button comparison-expand" aria-label={`${photo.name} 크게 보기`} onClick={() => onView(photo.id, current)}><Icon name="expand" /></button></div>
-      <div className="comparison-photo-info"><span>{photo.name}</span><button className="icon-button" aria-label={`${photo.name} 대표사진`} aria-pressed={photo.id === representativeId} disabled={busy || photo.id === representativeId} onClick={() => onRepresentative(photo.id)}><Icon name="star" /></button><button className="button secondary" aria-label={`${photo.name} 비교 선택`} aria-pressed={selected.has(photo.id)} disabled={busy || !!representativeId && photo.id !== representativeId} onClick={() => onSelect(photo.id)}><Icon name={selected.has(photo.id) ? 'check' : 'plus'} />선택</button></div>
+      <div className="comparison-open"><Preview photo={photo} thumbnailOnly /><button className="icon-button comparison-expand" disabled={busy} aria-label={`${photo.name} 크게 보기`} onClick={() => onView(photo.id, current)}><Icon name="expand" /></button></div>
+      <div className="comparison-photo-info"><span>{photo.name}</span><button className="icon-button" aria-label={`${photo.name} 대표사진`} aria-pressed={photo.id === representativeId} disabled={busy || photo.id === representativeId} onClick={() => onRepresentative(photo.id)}><Icon name="star" /></button><button className="button secondary separate-photo" aria-label={`${photo.name} 중복에서 빼기`} disabled={busy} onClick={() => onSeparate(photo.id)}>분리</button><button className="button secondary" aria-label={`${photo.name} 비교 선택`} aria-pressed={selected.has(photo.id)} disabled={busy || !!representativeId && photo.id !== representativeId} onClick={() => onSelect(photo.id)}><Icon name={selected.has(photo.id) ? 'check' : 'plus'} />선택</button></div>
     </article>)}</div>
     <footer className="comparison-footer"><output aria-label="선택한 사진 수">{selectedCount}</output><button className="button primary" aria-label="선택 다운로드" disabled={busy || selectedCount === 0} onClick={onDownload}><Icon name="download" />선택 다운로드</button></footer>
   </Modal>;
@@ -288,11 +288,14 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   const [comparisonGroupId, setComparisonGroupId] = useState<string | null>(null);
   const [comparisonPage, setComparisonPage] = useState(0);
   const representativeRetryId = useRef<string | null>(null);
+  const separationRetry = useRef<{ groupId: string; photoId: string } | null>(null);
+  const comparisonIdentity = useRef(comparisonGroupId);
+  comparisonIdentity.current = comparisonGroupId;
   const comparisonRequest = useRef(0);
   const candidatesRevision = useRef<string | null>(null);
   const returnComparisonId = useRef<string | null>(null);
   const clearComparison = useCallback(() => {
-    comparisonRequest.current += 1; candidatesRevision.current = null; representativeRetryId.current = null;
+    comparisonRequest.current += 1; candidatesRevision.current = null; representativeRetryId.current = null; separationRetry.current = null;
     setComparisonMode(false); setCandidates(null); setCandidatesLoading(false); setCandidatesError('');
     setComparisonGroupId(null); setComparisonPage(0); returnComparisonId.current = null;
   }, []);
@@ -783,7 +786,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   }
   async function chooseRepresentative(photoId: string) {
     if (!activeAlbumId || !comparisonGroupId || operation.current) return;
-    const albumId = activeAlbumId; const groupId = comparisonGroupId; representativeRetryId.current = photoId;
+    const albumId = activeAlbumId; const groupId = comparisonGroupId; representativeRetryId.current = photoId; separationRetry.current = null;
     const epoch = sourceEpoch.current; operation.current = true; mutationEpoch.current += 1; comparisonRequest.current += 1; candidatesRevision.current = visionRevision; setCandidatesLoading(false); setBusy(true); setError('');
     try {
       await sharedApi.setRepresentative(albumId, groupId, photoId);
@@ -802,6 +805,36 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
         representativeRetryId.current = null; candidatesRevision.current = null;
         setComparisonGroupId(null); setCandidates(null); setCandidatesError(''); setError('사진 묶음 변경');
       } else setError(reason instanceof Error ? reason.message : '대표사진 변경 실패');
+    } finally { operation.current = false; setBusy(false); }
+  }
+  async function separatePhoto(photoId: string, groupId = comparisonGroupId) {
+    if (!activeAlbumId || !groupId || operation.current) return;
+    const albumId = activeAlbumId;
+    const oldGroup = candidates?.groups.find(group => group.id === groupId);
+    separationRetry.current = { groupId, photoId }; representativeRetryId.current = null;
+    const epoch = sourceEpoch.current;
+    operation.current = true; mutationEpoch.current += 1; comparisonRequest.current += 1;
+    candidatesRevision.current = visionRevision; setCandidatesLoading(false); setBusy(true); setError('');
+    try {
+      const fresh = await sharedApi.excludeSimilarPhoto(albumId, groupId, photoId);
+      if (epoch !== sourceEpoch.current || albumIdentity.current !== albumId) return;
+      separationRetry.current = null; setCandidates(fresh); setCandidatesError('');
+      const latestStacks = buildPhotoStacks(photos, fresh.groups);
+      setSelected(previous => new Set(representativeDownloadIds([...previous], latestStacks)));
+      // Closing or enlarging a photo while the request runs must not reopen this dialog.
+      if (comparisonIdentity.current === groupId) {
+        const remaining = new Set(oldGroup?.photoIds.filter(id => id !== photoId));
+        const next = fresh.groups.find(group => group.photoIds.some(id => remaining.has(id)));
+        setComparisonGroupId(next?.id ?? null); setComparisonPage(0);
+      }
+      if (returnComparisonId.current === groupId) returnComparisonId.current = null;
+    } catch (reason) {
+      if (epoch !== sourceEpoch.current || albumIdentity.current !== albumId) return;
+      if (reason instanceof ApprovalRequired) approvalDenied(reason);
+      else if (reason instanceof ServerError && reason.status === 409) {
+        separationRetry.current = null; candidatesRevision.current = null;
+        setComparisonGroupId(null); setCandidates(null); setCandidatesError(''); setError('사진 묶음 변경');
+      } else setError(reason instanceof Error ? reason.message : '사진 분리 실패');
     } finally { operation.current = false; setBusy(false); }
   }
   async function downloadBatch() {
@@ -883,7 +916,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     <input key={pickerGeneration} ref={fileInput} className="visually-hidden" type="file" multiple accept="image/*,video/*" aria-label="사진 파일 선택" onChange={onFiles} />
     {selectedPhotos.length > 0 && (localMode || remote?.album) && <aside className="download-tray" aria-label="선택한 사진"><div className="tray-count"><span>{selectedPhotos.length}</span><small>{formatBytes(selectedPhotos.reduce((sum, photo) => sum + photo.size, 0))}</small></div><div className="tray-actions"><button className="text-button" onClick={() => setSelected(new Set())}>선택 해제</button><button className="button primary" onClick={() => setDownloadIds(selectedPhotos.map(photo => photo.id))} disabled={busy || !downloadReady}><Icon name="download" />선택 다운로드</button></div></aside>}
     {dragging && <div className="drop-overlay" aria-label="사진 업로드" onDragOver={event => event.preventDefault()} onDragLeave={() => setDragging(false)} onDrop={drop}><Icon name="plus" size={64} /></div>}
-    {comparisonGroupId && comparisonPhotos.length >= 2 && !viewerId && <Comparison key={comparisonGroupId} photos={comparisonPhotos} initialPage={comparisonPage} representativeId={stacks.find(stack => stack.id === comparisonGroupId)?.representative.id} onRepresentative={id => void chooseRepresentative(id)} failure={error ? <div className="failure-controls" role="group" aria-label="대표사진 변경 실패"><Icon name="alert" /><span className="visually-hidden" role="alert">{error}</span>{representativeRetryId.current && <button className="icon-button" aria-label="재시도" disabled={busy} onClick={() => void chooseRepresentative(representativeRetryId.current!)}><Icon name="retry" /></button>}<button className="icon-button" aria-label="오류 닫기" onClick={() => setError('')}><Icon name="close" /></button></div> : null} selected={selected} selectedCount={selectedPhotos.length} busy={busy} onSelect={id => selectPhoto(representativeDownloadIds([id], stacks)[0] ?? id)} onClose={() => setComparisonGroupId(null)} onView={(id, page) => { setComparisonPage(page); returnComparisonId.current = comparisonGroupId; setComparisonGroupId(null); setViewerId(id); }} onDownload={() => { setComparisonGroupId(null); returnComparisonId.current = null; setDownloadIds(selectedPhotos.map(photo => photo.id)); }} />}
+    {comparisonGroupId && comparisonPhotos.length >= 2 && !viewerId && <Comparison key={comparisonGroupId} photos={comparisonPhotos} initialPage={comparisonPage} representativeId={stacks.find(stack => stack.id === comparisonGroupId)?.representative.id} onRepresentative={id => void chooseRepresentative(id)} onSeparate={id => void separatePhoto(id)} failure={error ? <div className="failure-controls" role="group" aria-label={separationRetry.current ? "사진 분리 실패" : "대표사진 변경 실패"}><Icon name="alert" /><span className="visually-hidden" role="alert">{error}</span>{(separationRetry.current || representativeRetryId.current) && <button className="icon-button" aria-label="재시도" disabled={busy} onClick={() => { const retry = separationRetry.current; if (retry) void separatePhoto(retry.photoId, retry.groupId); else if (representativeRetryId.current) void chooseRepresentative(representativeRetryId.current); }}><Icon name="retry" /></button>}<button className="icon-button" aria-label="오류 닫기" onClick={() => setError('')}><Icon name="close" /></button></div> : null} selected={selected} selectedCount={selectedPhotos.length} busy={busy} onSelect={id => selectPhoto(representativeDownloadIds([id], stacks)[0] ?? id)} onClose={() => setComparisonGroupId(null)} onView={(id, page) => { setComparisonPage(page); returnComparisonId.current = comparisonGroupId; setComparisonGroupId(null); setViewerId(id); }} onDownload={() => { setComparisonGroupId(null); returnComparisonId.current = null; setDownloadIds(selectedPhotos.map(photo => photo.id)); }} />}
     {viewerId && visible.length > 0 && <Viewer photos={returnComparisonId.current ? stacks.find(stack => stack.id === returnComparisonId.current)?.photos ?? photos.filter(photo => photo.id === viewerId) : visible} initialId={viewerId} onClose={() => { setViewerId(null); if (returnComparisonId.current) { setComparisonGroupId(returnComparisonId.current); returnComparisonId.current = null; } }} onDownload={id => { setViewerId(null); returnComparisonId.current = null; setDownloadIds(representativeDownloadIds([id], stacks)); }} onNotice={setNotice} />}
     {downloadIds && <Modal label="선택 사진 다운로드" onClose={() => { if (!busy) setDownloadIds(null); }} className="download-dialog"><header className="dialog-header"><h2>다운로드</h2><button className="icon-button" disabled={busy} aria-label="다운로드 창 닫기" onClick={() => setDownloadIds(null)}><Icon name="close" /></button></header>
       {errorControl()}<button className="button primary batch-download" disabled={busy || !downloadReady || !normalizedDownloadIds?.length || (normalizedDownloadIds.length > 1 && downloadSize > MAX_ARCHIVE_BYTES)} onClick={() => void downloadBatch()}><Icon name="download" />일괄 다운로드 <span>{normalizedDownloadIds?.length}</span></button><div className="download-capacity"><span>{formatBytes(downloadSize)}</span>{(normalizedDownloadIds?.length ?? 0) > 1 && <span>/ {formatBytes(MAX_ARCHIVE_BYTES)}</span>}</div>
