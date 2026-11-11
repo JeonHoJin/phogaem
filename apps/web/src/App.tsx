@@ -5,6 +5,7 @@ import { ApprovalRequired } from './server/api';
 import type { Album, SharedMember, SimilarPhotos } from './server/api';
 import { registerPasskey, signInWithPasskey, passkeySupported } from './server/passkey';
 import { beginGoogleAuth, GOOGLE_LOGIN_ENABLED } from './server/google';
+import { inviteShareUrl, inviteTokenFromInput } from './server/invite';
 import googleSignInIcon from './assets/google-sign-in.svg';
 import type { ChangeEvent, DragEvent, ReactNode } from 'react';
 import { server, ServerError } from './server/index';
@@ -591,8 +592,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     const epoch = sourceEpoch.current;
     setBusy(true); setError(''); setInviteFailure(null); clearComparison();
     try {
-      let token = inviteToken.trim();
-      if (token.includes('#')) token = new URLSearchParams(token.split('#')[1]).get('invite') ?? '';
+      const token = inviteTokenFromInput(inviteToken);
       if (!token) throw new ServerError(404, '초대 없음');
       const album = await sharedApi.joinInvite(token);
       if (epoch !== sourceEpoch.current) return;
@@ -643,9 +643,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     if (!remote?.album) return;
     await mutate(async () => {
       const result = await sharedApi.createInvite(remote.album!.id);
-      const url = new URL(import.meta.env.BASE_URL, location.origin);
-      url.hash = new URLSearchParams({ invite: result.token }).toString();
-      setInviteLink(url.href); setInviteExpires(result.expiresAt); setManagerOpen(true);
+      setInviteLink(inviteShareUrl(result.token)); setInviteExpires(result.expiresAt); setManagerOpen(true);
       return photos;
     });
   }

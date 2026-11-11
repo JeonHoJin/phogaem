@@ -175,6 +175,24 @@ test('shared-library UI creates, invites, shares and downloads an original after
   await expect(page.getByRole('img', { name: 'shared-ui.png', exact: true })).toBeVisible();
   await page.getByRole('button', { name: '초대 링크 만들기', exact: true }).click();
   const invitation = await page.getByLabel('초대 링크', { exact: true }).inputValue();
+  const previewUrl = new URL(invitation);
+  expect(previewUrl.origin).toBe(apiBase);
+  expect(previewUrl.pathname).toBe('/op/phogaem-invite-preview/v1');
+  expect(previewUrl.hash).toBe('');
+  const preview = await page.request.get(invitation, { headers: { 'user-agent': 'KakaoTalk-Scrap/1.0' } });
+  expect(preview.status()).toBe(200);
+  expect(preview.headers()['content-type']).toContain('text/html');
+  expect(await preview.text()).toContain('property="og:title" content="포갬 - 브라우저에서 만든 여행"');
+  const previewContext = await browser.newContext();
+  try {
+    const previewPage = await previewContext.newPage();
+    // Exercise the real server HTML/CSP, but intercept the fixed production app destination.
+    await previewPage.route('https://jeonhojin.github.io/phogaem/**', route => route.fulfill({
+      contentType: 'text/html', body: '<!doctype html><title>Synthetic invitation destination</title>',
+    }));
+    await previewPage.goto(invitation, { waitUntil: 'commit' });
+    await expect(previewPage).toHaveURL(`https://jeonhojin.github.io/phogaem/#invite=${previewUrl.searchParams.get('token')}`);
+  } finally { await previewContext.close(); }
   const friendContext = await browser.newContext();
   try {
     const friend = await friendContext.newPage();

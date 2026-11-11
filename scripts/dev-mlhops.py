@@ -150,6 +150,8 @@ class Stack:
         token = self.work / "registry.token"
         shared = {"MLHOPS_REGISTRY_TOKEN_FILE": str(token), "MLHOPS_DATABASE_URL_FILE": str(self.database_file)}
         self.spawn("mlhops-core", {
+            # Optional providers must not read this Mac's production OAuth configuration.
+            "HOME": str(self.work),
             **shared, "MLHOPS_CORE_API_ADDR": f"127.0.0.1:{core}",
             "MLHOPS_CORE_REGISTRY_ADDR": f"127.0.0.1:{registry}",
             "MLHOPS_JWT_KEY_FILE": str(self.work / "jwt.key"), "MLHOPS_DATABASE_SCHEMA": "dev_core",
