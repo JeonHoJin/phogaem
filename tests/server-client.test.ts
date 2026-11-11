@@ -465,6 +465,65 @@ test('original reads are paced and at most two response bodies download concurre
   } finally { release.forEach(run => run()); server.op = originalOp; }
 });
 
+test('queued image reads prioritize explicit originals and newly visible thumbnails without losing pacing', async () => {
+  const originalOp = server.op;
+  const starts: Array<{ id: string; at: number }> = [];
+  const release = new Map<string, () => void>();
+  let active = 0;
+  let maximum = 0;
+  let cleanup = false;
+  server.op = async (_name, init) => {
+    const id = init?.query?.photoId ?? '';
+    starts.push({ id, at: Date.now() });
+    active += 1; maximum = Math.max(maximum, active);
+    return new Response(new ReadableStream<Uint8Array>({ start(controller) {
+      let released = false;
+      const finish = () => {
+        if (released) return;
+        released = true; active -= 1;
+        controller.enqueue(new TextEncoder().encode(id)); controller.close();
+      };
+      release.set(id, finish);
+      if (cleanup) finish();
+    } }));
+  };
+  const pending: Promise<Blob>[] = [];
+  try {
+    pending.push(getThumbnailBlob('album', 'first'), getThumbnailBlob('album', 'second'));
+    await waitForUpload(() => starts.length === 2);
+    let staleScore = 0;
+    let visibleScore = 100;
+    pending.push(
+      getThumbnailBlob('album', 'stale-prefetch', () => staleScore),
+      getThumbnailBlob('album', 'newly-visible', () => visibleScore),
+      getThumbnailBlob('album', 'nearby-prefetch', () => 20),
+      getThumbnailBlob('album', 'invalid-score', () => Number.NaN),
+      getThumbnailBlob('album', 'throwing-score', () => { throw new Error('detached preview'); }),
+      getPhotoBlob('album', 'opened-original'),
+    );
+    // Even an invalid negative thumbnail score cannot outrank an explicitly opened original.
+    staleScore = 100; visibleScore = -100;
+    const expected = ['opened-original', 'newly-visible', 'nearby-prefetch', 'stale-prefetch', 'invalid-score', 'throwing-score'];
+    const complete = ['first', 'second', 'opened-original', 'newly-visible', 'nearby-prefetch', 'stale-prefetch'];
+    for (let index = 0; index < expected.length; index += 1) {
+      release.get(complete[index]!)!();
+      await waitForUpload(() => starts.length === index + 3);
+      assert.equal(starts[index + 2]!.id, expected[index]);
+    }
+    release.get('invalid-score')!(); release.get('throwing-score')!();
+    await Promise.all(pending);
+    assert.equal(maximum, 2, 'priority does not bypass the response-body concurrency limit');
+    for (let index = 1; index < starts.length; index += 1) {
+      assert.ok(starts[index]!.at - starts[index - 1]!.at >= 340, 'priority does not bypass the 350ms start interval');
+    }
+  } finally {
+    cleanup = true;
+    release.forEach(finish => finish());
+    await Promise.allSettled(pending);
+    server.op = originalOp;
+  }
+});
+
 test('only original GETs retry a rate limit once, respecting the bounded retry delay', async () => {
   const originalOp = server.op;
   let calls = 0;

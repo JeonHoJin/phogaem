@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
+import { ThumbnailCache } from './thumbnailCache';
 import { PhotoGrid } from './PhotoGrid';
 import { AlbumNotifications } from './AlbumNotifications';
 import { PUSH_ENABLED } from './server/push';
@@ -65,7 +66,8 @@ const FILTERS: { id: PhotoFilter; label: string }[] = [
 // Remote originals are loaded only near the viewport and released when off-screen.
 // This map deduplicates in-flight reads; it does not retain all original blobs.
 const originalReads = new Map<string, Promise<Blob>>();
-const thumbnailReads = new Map<string, Promise<Blob>>();
+// Small previews survive scrolling; originals remain in-flight-only.
+const thumbnailCache = new ThumbnailCache();
 const ApprovalContext = createContext<(error: ApprovalRequired) => void>(() => {});
 async function originalBlob(photo: Photo): Promise<Blob> {
   if (photo.blob) return photo.blob;
@@ -79,15 +81,10 @@ async function originalBlob(photo: Photo): Promise<Blob> {
   return pending;
 }
 
-async function thumbnailBlob(photo: Photo): Promise<Blob> {
+async function thumbnailBlob(photo: Photo, priority: () => number): Promise<Blob> {
   if (!photo.albumId) throw new Error('사진의 보관함을 찾지 못했어요.');
   const key = `${photo.albumId}:${photo.id}`;
-  let pending = thumbnailReads.get(key);
-  if (!pending) {
-    pending = sharedApi.getThumbnailBlob(photo.albumId, photo.id).finally(() => thumbnailReads.delete(key));
-    thumbnailReads.set(key, pending);
-  }
-  return pending;
+  return thumbnailCache.get(key, () => sharedApi.getThumbnailBlob(photo.albumId!, photo.id, priority));
 }
 
 function Preview({ photo, large = false, thumbnailOnly = false }: { photo: Photo; large?: boolean; thumbnailOnly?: boolean }) {
@@ -101,16 +98,22 @@ function Preview({ photo, large = false, thumbnailOnly = false }: { photo: Photo
   const thumbnailState = !large && photo.albumId ? photo.processing?.thumbnail.state ?? (thumbnailOnly ? 'pending' : undefined) : undefined;
   useEffect(() => {
     if (photo.blob || large || !container.current) return;
-    const observer = new IntersectionObserver(([entry]) => setNear(entry.isIntersecting), { rootMargin: '150px' });
+    const observer = new IntersectionObserver(([entry]) => setNear(entry.isIntersecting), { rootMargin: thumbnailState === 'succeeded' ? '1200px' : '150px' });
     observer.observe(container.current);
     return () => observer.disconnect();
-  }, [photo.blob, large]);
+  }, [photo.blob, large, thumbnailState]);
   useEffect(() => {
     if (!near || (thumbnailState !== undefined && thumbnailState !== 'succeeded')) { setUrl(''); setError(''); setDecodeFailed(false); return; }
     let active = true;
     let objectUrl = '';
     setError(''); setDecodeFailed(false);
-    (thumbnailState ? thumbnailBlob(photo) : originalBlob(photo)).then(blob => {
+    const thumbnailPriority = () => {
+      const element = container.current;
+      if (!element?.isConnected) return Infinity;
+      const rect = element.getBoundingClientRect();
+      return Math.max(0, -rect.bottom, rect.top - window.innerHeight);
+    };
+    (thumbnailState ? thumbnailBlob(photo, thumbnailPriority) : originalBlob(photo)).then(blob => {
       if (!active) return;
       objectUrl = URL.createObjectURL(blob);
       setUrl(objectUrl);
@@ -354,7 +357,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   const approvalDenied = useCallback((reason: ApprovalRequired) => {
     sourceEpoch.current += 1;
     clearComparison();
-    originalReads.clear(); thumbnailReads.clear();
+    originalReads.clear(); thumbnailCache.clear();
     setApprovalCode(reason.accountCode);
     setRemote(null); setPhotos([]); setSelected(new Set());
     setSelectionMode(false); setViewerId(null); setDownloadIds(null); setInviteLink('');
@@ -581,7 +584,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     });
   }
   const clearTransient = useCallback(() => {
-    clearComparison();
+    clearComparison(); thumbnailCache.clear();
     setSelectionMode(false); setSelected(new Set()); setViewerId(null); setDownloadIds(null); setInviteLink(''); setNotice(''); setCopied(false); setQueuedFiles([]); setProgress(null);
   }, [clearComparison]);
   function googleButton(link = false) {

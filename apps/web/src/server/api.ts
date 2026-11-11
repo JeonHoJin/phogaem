@@ -216,7 +216,7 @@ export async function uploadSharedPhotos(albumId: string, files: File[], onProgr
 }
 
 interface OriginalResult { response: Response; blob?: Blob }
-const originalQueue: Array<{ run: () => Promise<OriginalResult>; resolve: (value: OriginalResult) => void; reject: (reason: unknown) => void }> = [];
+const originalQueue: Array<{ run: () => Promise<OriginalResult>; priority: () => number; resolve: (value: OriginalResult) => void; reject: (reason: unknown) => void }> = [];
 let activeOriginals = 0;
 let nextOriginalStart = 0;
 let originalTimer: ReturnType<typeof setTimeout> | undefined;
@@ -228,7 +228,18 @@ function pumpOriginalQueue(): void {
     originalTimer = setTimeout(() => { originalTimer = undefined; pumpOriginalQueue(); }, wait);
     return;
   }
-  const task = originalQueue.shift()!;
+  // Read scores when a slot opens: scrolling may have made a queued preview visible.
+  const score = (priority: () => number) => {
+    try { const value = priority(); return Number.isFinite(value) ? value : Infinity; }
+    catch { return Infinity; }
+  };
+  let next = 0;
+  let best = score(originalQueue[0]!.priority);
+  for (let index = 1; index < originalQueue.length; index += 1) {
+    const value = score(originalQueue[index]!.priority);
+    if (value < best) { next = index; best = value; }
+  }
+  const [task] = originalQueue.splice(next, 1);
   activeOriginals += 1;
   nextOriginalStart = Date.now() + 350;
   nextTransferStart = Date.now() + 250;
@@ -236,8 +247,8 @@ function pumpOriginalQueue(): void {
   pumpOriginalQueue();
 }
 
-function queuedOriginal(run: () => Promise<OriginalResult>): Promise<OriginalResult> {
-  return new Promise((resolve, reject) => { originalQueue.push({ run, resolve, reject }); pumpOriginalQueue(); });
+function queuedOriginal(run: () => Promise<OriginalResult>, priority: () => number): Promise<OriginalResult> {
+  return new Promise((resolve, reject) => { originalQueue.push({ run, priority, resolve, reject }); pumpOriginalQueue(); });
 }
 
 function retryDelay(response: Response): number {
@@ -247,14 +258,14 @@ function retryDelay(response: Response): number {
   return Math.min(3000, Math.max(350, Number.isFinite(delay) ? delay : 1000));
 }
 
-async function getImageBlob(operation: 'photo-get' | 'thumbnail-get', albumId: string, photoId: string): Promise<Blob> {
+async function getImageBlob(operation: 'photo-get' | 'thumbnail-get', albumId: string, photoId: string, priority?: () => number): Promise<Blob> {
   // The gateway allows 5 requests/sec per IP. Pace originals and keep at most two in flight;
   // metadata and mutations stay outside this queue. Only this idempotent GET retries a 429.
   for (let attempt = 0; ; attempt += 1) {
     const { response, blob } = await queuedOriginal(async () => {
       const response = await server.op(`phogaem-${operation}`, { version: 'v1', method: 'GET', query: { albumId, photoId } });
       return { response, blob: response.ok ? await response.blob() : undefined };
-    });
+    }, operation === 'photo-get' ? () => -1 : () => Math.max(0, priority?.() ?? 0));
     if (response.status === 429 && attempt === 0) {
       await new Promise(resolve => setTimeout(resolve, retryDelay(response)));
       continue;
@@ -268,8 +279,8 @@ export function getPhotoBlob(albumId: string, photoId: string): Promise<Blob> {
   return getImageBlob('photo-get', albumId, photoId);
 }
 
-export function getThumbnailBlob(albumId: string, photoId: string): Promise<Blob> {
-  return getImageBlob('thumbnail-get', albumId, photoId);
+export function getThumbnailBlob(albumId: string, photoId: string, priority?: () => number): Promise<Blob> {
+  return getImageBlob('thumbnail-get', albumId, photoId, priority);
 }
 
 export async function retryProcessing(albumId: string, photoId: string, kind: ProcessingKind): Promise<void> {
