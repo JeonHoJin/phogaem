@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { PhotoGrid } from './PhotoGrid';
 import { AlbumNotifications } from './AlbumNotifications';
 import { PUSH_ENABLED } from './server/push';
@@ -231,6 +232,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   const [remote, setRemote] = useState<{ userId: string; albums: Album[]; album: Album | null; members: SharedMember[] } | null>(null);
   const [pendingNotificationAlbum, setPendingNotificationAlbum] = useState(() => notificationAlbum(location.hash));
   const [localMode, setLocalMode] = useState(false);
+  const [uploadPhase, setUploadPhase] = useState<'preparing' | 'uploading' | 'finishing' | null>(null);
   const [queuedFiles, setQueuedFiles] = useState<File[]>([]);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [rejectedFiles, setRejectedFiles] = useState<Set<File>>(new Set());
@@ -299,10 +301,10 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   const selectedPhotos = visible.filter(p => selected.has(p.id));
   const totalSize = photos.reduce((sum, p) => sum + p.size, 0);
   const duplicateCount = filterPhotos(stacks.map(stack => stack.representative), 'duplicates', member, similarIds).length;
-  const queuedValid = queuedFiles.length > 0 && queuedFiles.every(file => {
+  const queuedValid = useMemo(() => !busy && queuedFiles.length > 0 && queuedFiles.every(file => {
     try { if (rejectedFiles.has(file)) return false; if (remote) sharedApi.validateSharedFiles([file]); else validateLocalFile(file); return true; }
     catch { return false; }
-  });
+  }), [busy, queuedFiles, rejectedFiles, remote]);
   const downloadSize = (normalizedDownloadIds ?? []).reduce((sum, id) => sum + (photos.find(photo => photo.id === id)?.size ?? 0), 0);
   const candidateGroups = useMemo(() => (candidates?.groups ?? []).map(group => {
     const ids = new Set(group.photoIds);
@@ -356,6 +358,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     setApprovalCode(reason.accountCode);
     setRemote(null); setPhotos([]); setSelected(new Set());
     setSelectionMode(false); setViewerId(null); setDownloadIds(null); setInviteLink('');
+    setQueuedFiles([]); setProgress(null); setUploadPhase(null);
     retryAction.current = null; setNotice(''); setError(''); setManagerOpen(true); setLocalMode(false);
   }, [clearComparison]);
 
@@ -438,11 +441,38 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     }
     finally { operation.current = false; setBusy(false); }
   }
-  async function upload(files: File[]) {
-    if (!files.length || busy || loading) return;
+  async function upload(source: FileList | File[]) {
+    if (!source.length || operation.current || busy || loading) return;
     const uploadEpoch = sourceEpoch.current;
-    setQueuedFiles(files); setProgress({ done: 0, total: files.length });
-    await mutate(async () => {
+    // Commit feedback before reading file entries or validating a large batch.
+    flushSync(() => {
+      setUploadPhase('preparing'); setQueuedFiles([]);
+      setProgress({ done: 0, total: source.length });
+    });
+    const afterPaint = () => new Promise<void>(resolve => {
+      let frame = 0;
+      let paintTimer = 0;
+      const finish = () => {
+        cancelAnimationFrame(frame); window.clearTimeout(paintTimer);
+        window.clearTimeout(fallback); resolve();
+      };
+      // Hidden tabs may suspend animation frames; never leave an upload waiting on one.
+      const fallback = window.setTimeout(finish, 100);
+      frame = requestAnimationFrame(() => {
+        frame = requestAnimationFrame(() => { paintTimer = window.setTimeout(finish, 0); });
+      });
+    });
+    try { await mutate(async () => {
+      await afterPaint();
+      const files: File[] = [];
+      for (const file of source) {
+        files.push(file);
+        if (files.length % 32 === 0) await afterPaint();
+      }
+      if (uploadEpoch !== sourceEpoch.current) return [];
+      setQueuedFiles(files); setUploadPhase('uploading');
+      await afterPaint();
+      if (uploadEpoch !== sourceEpoch.current) return [];
       if (remote) {
         if (!remote.album) throw new Error('먼저 공유보관함을 만들거나 선택해 주세요.');
         const completedIndices = new Set<number>();
@@ -465,7 +495,8 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
           try { const partial = await refreshAlbum(remote.album.id); if (uploadEpoch === sourceEpoch.current) setPhotos(partial); } catch (refreshError) { if (refreshError instanceof ApprovalRequired) throw refreshError; }
           throw reason;
         }
-        setQueuedFiles([]); setProgress(null); return refreshAlbum(remote.album.id);
+        setQueuedFiles([]); setUploadPhase('finishing');
+        return await refreshAlbum(remote.album.id);
       }
       files.forEach(validateLocalFile);
       let added = 0; let duplicates = 0; let currentPhotos = photos;
@@ -475,12 +506,18 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
         if (uploadEpoch !== sourceEpoch.current) return currentPhotos;
         setPhotos(currentPhotos); setProgress({ done: index + 1, total: files.length }); setQueuedFiles(files.slice(index + 1));
       }
-      setQueuedFiles([]); setProgress(null);
+      setQueuedFiles([]);
       setNotice(`${added}장 추가 · 중복 ${duplicates}장`);
       return currentPhotos;
-    });
+    }); } finally {
+      setUploadPhase(null); setProgress(null);
+    }
   }
-  function onFiles(event: ChangeEvent<HTMLInputElement>) { void upload(Array.from(event.target.files ?? [])); event.target.value = ''; }
+  function onFiles(event: ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const files = input.files;
+    if (files?.length) void upload(files).finally(() => { if (input.files === files) input.value = ''; });
+  }
   function drop(event: DragEvent) { event.preventDefault(); setDragging(false); void upload(Array.from(event.dataTransfer.files)); }
   function toggleFilter(filter: PhotoFilter) {
     if (filter === 'all') { setFilters(['all']); return; }
@@ -788,7 +825,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
           <div className="album-actions" role="group" aria-label="보관함 작업">{(!remote.album?.ownerId || remote.album.ownerId === remote.userId) && <button className="button secondary invite-button" disabled={busy} onClick={() => void invite()}><Icon name="invite" />친구 초대</button>}<button className="button secondary" disabled={busy} onClick={() => openManager('settings')}><Icon name="settings" />보관함 설정</button></div>
         </> : <><select aria-label="미리보기 사용자" value={localMember} disabled={busy} onChange={event => { setLocalMember(event.target.value); setDownloadIds(null); }}>{MEMBERS.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select><button className="text-button" disabled={busy || photos.length > 0} onClick={() => void mutate(seedDemo)}>샘플</button></>}</div>
         {!managerOpen && !downloadIds && errorControl()}
-        {queuedFiles.length > 0 && <section className="upload-queue" aria-label="업로드 파일"><div className="queue-progress">{progress && <><progress value={progress.done} max={progress.total} aria-label="업로드" /><output>{progress.done}/{progress.total}</output></>}</div>{queuedFiles.map((file, index) => <div className="queue-item" key={`${index}:${file.name}`}><Icon name={error ? 'alert' : 'image'} /><span>{file.name}</span><span>{formatBytes(file.size)}</span>{!busy && <button className="icon-button" aria-label={`${file.name} 대기열에서 제거`} onClick={() => { setQueuedFiles(current => current.filter((_, i) => i !== index)); }}><Icon name="close" /></button>}</div>)}{!busy && <button className="button secondary" disabled={!queuedValid} onClick={() => void upload(queuedFiles)}>올리기</button>}</section>}
+        {queuedFiles.length > 0 && <section className="upload-queue" aria-label="업로드 파일"><div className="queue-progress">{progress && <><progress value={progress.done} max={progress.total} aria-label="업로드" /><output>{progress.done}/{progress.total}</output></>}</div>{(busy ? queuedFiles.slice(0, 32) : queuedFiles).map((file, index) => <div className="queue-item" key={`${index}:${file.name}`}><Icon name={error ? 'alert' : 'image'} /><span>{file.name}</span><span>{formatBytes(file.size)}</span>{!busy && <button className="icon-button" aria-label={`${file.name} 대기열에서 제거`} onClick={() => { setQueuedFiles(current => current.filter((_, i) => i !== index)); }}><Icon name="close" /></button>}</div>)}{busy && queuedFiles.length > 32 && <output className="queue-remaining" aria-label="나머지 파일">+{queuedFiles.length - 32}</output>}{!busy && <button className="button secondary" disabled={!queuedValid} onClick={() => void upload(queuedFiles)}>올리기</button>}</section>}
         <section className="library" aria-label="사진 보관함"><div className="library-top"><span>{photos.length}</span><div className="library-tools">{remote?.album && <div className="photo-tools" role="group" aria-label="사진 도구"><button className="text-button" aria-pressed={comparisonMode} disabled={busy} onClick={() => { if (comparisonMode) clearComparison(); else void loadCandidates(); }}><Icon name="sparkles" size={17} />비교</button><button className="icon-button" aria-label="새로고침" disabled={busy} onClick={() => void selectAlbum(remote.album!.id)}><Icon name="retry" /></button>{PUSH_ENABLED && <AlbumNotifications key={`${remote.userId}:${remote.album.id}`} albumId={remote.album.id} userId={remote.userId} active={!busy && !loading} onError={reason => { if (reason instanceof ApprovalRequired) approvalDenied(reason); else setError(reason instanceof Error ? reason.message : '알림 설정 실패'); }} />}</div>}<button className="text-button" disabled={!pendingPhotos.length || busy} onClick={() => setDownloadIds(pendingPhotos.map(p => p.id))}><Icon name="download" size={16} />다운로드 기록 {pendingPhotos.length > 0 && <span>{pendingPhotos.length}</span>}</button></div></div>
           <div className="filter-row"><div className="filter-chips" aria-label="사진 필터">{FILTERS.map(filter => <button key={filter.id} className={`filter-chip ${filters.includes(filter.id) ? 'active' : ''}`} aria-label={filter.label} aria-pressed={filters.includes(filter.id)} onClick={() => toggleFilter(filter.id)}>{({ all: '전체', others: '내 사진 제외', mine: '내 사진', unreceived: '받은 사진 제외', duplicates: '중복' })[filter.id]}{filter.id === 'duplicates' && duplicateCount > 0 && <span>{duplicateCount}</span>}</button>)}</div></div>
           <div className="selection-row"><label className="select-all"><input type="checkbox" aria-label="현재 사진 전체 선택" checked={visible.length > 0 && visible.every(p => selected.has(p.id))} disabled={!visible.length || busy} onChange={event => setSelected(event.target.checked ? new Set(visible.map(p => p.id)) : new Set())} />전체 선택</label><div className="selection-tools"><span>{visible.length}</span><button className="text-button" aria-label="사진 선택" aria-pressed={selectionMode} disabled={busy || !visible.length} onClick={() => setSelectionMode(value => !value)}>{selectionMode ? '완료' : '선택'}</button><div className="grid-zoom"><button className="icon-button" aria-label="사진 확대" disabled={busy || columns <= 2} onClick={() => setColumns(value => Math.max(2, value - 1))}><Icon name="plus" size={16} /></button><output aria-label="한 줄 사진 수">{columns}</output><button className="icon-button" aria-label="사진 축소" disabled={busy || columns >= maxColumns} onClick={() => setColumns(value => Math.min(maxColumns, value + 1))}><Icon name="minus" size={16} /></button></div></div></div>
@@ -800,6 +837,11 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
         </section>
       </>}
     </main>
+    {uploadPhase && progress && <aside className="upload-status" role="status" aria-label={uploadPhase === 'preparing' ? '사진 준비 중' : uploadPhase === 'finishing' ? '사진 목록 갱신 중' : '사진 업로드 중'}>
+      <span className="upload-spinner" aria-hidden="true" />
+      <progress aria-label="업로드 진행" max={progress.total} value={uploadPhase === 'uploading' && progress.done > 0 ? progress.done : undefined} />
+      <output>{progress.done}/{progress.total}</output>
+    </aside>}
     {needsNickname && <Modal label="닉네임 설정" onClose={() => {}} className="download-dialog"><header className="dialog-header"><h2>닉네임</h2></header>{errorControl()}<form className="member-name-form" onSubmit={event => { event.preventDefault(); void saveNickname(); }}><label htmlFor="member-nickname">닉네임<input id="member-nickname" aria-label="닉네임" value={nickname} onChange={event => setNickname(event.target.value)} maxLength={24} required disabled={busy} autoComplete="nickname" autoFocus /></label><button className="button primary" disabled={busy || !nickname.trim()}>완료</button></form></Modal>}
     <input ref={fileInput} className="visually-hidden" type="file" multiple accept="image/jpeg,image/png,image/webp,image/heic,image/heif,image/avif,image/gif,.heic,.heif" aria-label="사진 파일 선택" onChange={onFiles} />
     {selectedPhotos.length > 0 && (localMode || remote?.album) && <aside className="download-tray" aria-label="선택한 사진"><div className="tray-count"><span>{selectedPhotos.length}</span><small>{formatBytes(selectedPhotos.reduce((sum, photo) => sum + photo.size, 0))}</small></div><div className="tray-actions"><button className="text-button" onClick={() => setSelected(new Set())}>선택 해제</button><button className="button primary" onClick={() => setDownloadIds(selectedPhotos.map(photo => photo.id))} disabled={busy || !downloadReady}><Icon name="download" />선택 다운로드</button></div></aside>}

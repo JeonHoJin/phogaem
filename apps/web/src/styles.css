@@ -91,3 +91,5 @@
 }
 
 .invite-renew{justify-self:end;display:inline-flex;align-items:center;gap:8px;min-height:44px;padding:8px;font-size:13px}
+
+.upload-status{position:fixed;bottom:calc(20px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);z-index:25;display:flex;align-items:center;gap:14px;width:min(340px,calc(100% - 32px));padding:16px 20px;border:1px solid var(--line);border-radius:16px;background:var(--paper);color:var(--green);box-shadow:0 8px 30px #1d2b2026;pointer-events:none}.upload-status progress{flex:1;min-width:0;height:8px;accent-color:var(--green)}.upload-status output{font-size:13px;font-variant-numeric:tabular-nums}.upload-spinner{width:18px;height:18px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:upload-spin 1s linear infinite}.queue-remaining{display:block;padding-top:12px;font-size:12px;font-variant-numeric:tabular-nums}@keyframes upload-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.upload-spinner{animation:none}}

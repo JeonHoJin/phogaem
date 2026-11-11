@@ -109,3 +109,5 @@ Acceptance for the UI migration: traverse normal, empty, loading, failed, offlin
 - [ ] Product: retention duration remains a separate decision, with no new cloud cost introduced by this UI contract.
 
 The shared `중복` filter includes repeated identical-file imports and known members of similar-photo candidate groups. It fetches candidates without opening comparison, refreshes on analysis state changes, and retains AND semantics for the other active filters. Similarity never changes original bytes, exact deduplication, or receipt state.
+
+Photo selection commits compact preparation feedback before enumerating or validating the batch. Upload progress stays fixed within the viewport through the final album refresh, using only a spinner, progress bar and numeric completed/total count. Preparation and a pending first response use indeterminate progress. Large batches yield between groups of files and show at most 32 waiting rows during transfer, plus the remaining count; failed queues expose every remaining file for recovery. Approval revocation clears queued filenames and progress together with protected album content.
