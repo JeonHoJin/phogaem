@@ -3,7 +3,7 @@ export type MemberId = string;
 export type ProcessingKind = 'thumbnail' | 'vision';
 export type ProcessingState = 'pending' | 'running' | 'succeeded' | 'failed';
 export interface ProcessingJob { state: ProcessingState; attempts: number }
-export type PhotoProcessing = Record<ProcessingKind, ProcessingJob>;
+export interface PhotoProcessing { thumbnail: ProcessingJob; vision?: ProcessingJob }
 
 export interface Photo {
   id: string;

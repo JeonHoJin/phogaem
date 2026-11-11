@@ -72,7 +72,7 @@ export async function createAlbum(title: string, nickname?: string): Promise<Alb
 }
 
 export function getAlbum(albumId: string): Promise<SharedAlbum> {
-  return json('album-get', undefined, { albumId });
+  return json('album-get', undefined, { albumId, videoThumbnails: 'true' });
 }
 
 export async function getSimilarPhotos(albumId: string): Promise<SimilarPhotos> {
@@ -188,7 +188,7 @@ export async function uploadSharedPhotos(albumId: string, files: File[], onProgr
   await Promise.allSettled(files.map((file, index) => queuedUpload(async () => {
     try {
       const response = await server.op('phogaem-photo-upload', {
-        version: 'v1', method: 'POST', query: { albumId, name: file.name },
+        version: 'v1', method: 'POST', query: { albumId, name: file.name, videoThumbnails: 'true' },
         headers: { 'content-type': fileType(file) }, body: file,
       });
       const result = await (await checked(response)).json() as { added: boolean; photo: RemotePhoto };

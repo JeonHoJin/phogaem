@@ -358,6 +358,7 @@ test('passkey account adoption replaces the device key only after the link succe
 test('photo API uses encoded flat op queries, raw originals and separate metadata and bytes', async () => {
   const originalOp = server.op;
   const transport = mockTransport(async (url, init) => {
+    if (url.pathname.endsWith('phogaem-album-get/v1') || url.pathname.endsWith('phogaem-photo-upload/v1')) assert.equal(url.searchParams.get('videoThumbnails'), 'true');
     if (url.pathname.endsWith('phogaem-photo-upload/v1')) {
       assert.equal(url.searchParams.get('albumId'), 'album +&');
       assert.equal(url.searchParams.get('name'), '여행 & 한 장.HEIC');
@@ -939,6 +940,7 @@ test('shared videos preserve raw bodies, accept camera MIME fallback and remain 
   const uploads: Array<{ name: string; type: string; body: Blob }> = [];
   server.op = async (name, init) => {
     assert.equal(name, 'phogaem-photo-upload');
+    assert.equal(init!.query!.videoThumbnails, 'true');
     uploads.push({ name: init!.query!.name!, type: new Headers(init!.headers).get('content-type')!, body: init!.body as File });
     return Response.json({ added: true, photo: { id: `video-${uploads.length}` } });
   };

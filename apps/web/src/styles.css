@@ -97,3 +97,24 @@
 .picker-status{width:auto;min-width:96px;justify-content:space-between;pointer-events:auto;padding:6px 8px 6px 20px}.preview-container video{display:block;width:100%;height:100%;object-fit:contain}.viewer-stage .preview-container video{max-height:calc(100dvh - 150px)}
 
 .comparison-photo-info .separate-photo{min-height:44px;background:transparent;border-color:var(--line)}
+
+/* A continuous media surface; controls and status never add gallery rows. */
+.photo-grid[data-columns]{gap:0;margin-block:0;align-items:start}
+.photo-grid .photo-card{position:relative;aspect-ratio:1;overflow:hidden;margin:0;padding:0}
+.photo-grid .photo-frame{width:100%;height:100%;aspect-ratio:1;border:0;border-radius:0;margin:0;padding:0;box-shadow:none}
+.photo-grid .photo-open{margin:0;padding:0}
+.photo-grid .is-selected .photo-frame::after{content:'';position:absolute;inset:0;border:3px solid var(--green);pointer-events:none;z-index:2}
+.photo-grid .photo-select{z-index:3}
+.photo-grid .photo-stack-layer,.photo-grid .photo-stack-layer:first-child{inset:0;height:100%;border:0;border-radius:0;transform:none;z-index:0}
+.photo-grid .photo-stack .photo-frame{left:4px;top:4px;width:calc(100% - 4px);height:calc(100% - 4px);z-index:1}
+.photo-grid .photo-info,.photo-grid .photo-meta{position:absolute;width:1px;height:1px;padding:0;margin:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+.photo-grid .processing-states{position:absolute;right:2px;bottom:2px;top:auto;display:flex;align-items:end;gap:2px;min-height:0;margin:0;pointer-events:none;z-index:4}
+.photo-grid .processing-state{min-width:18px;min-height:18px;padding:2px;gap:0;border:0;border-radius:3px;background:#ffffffe6}
+.photo-grid .processing-state>svg:first-child{display:none}
+.photo-grid .processing-state.succeeded{position:absolute;width:1px;height:1px;min-width:0;min-height:0;padding:0;overflow:hidden;clip-path:inset(50%)}
+.photo-grid .processing-summary{width:44px;height:44px;padding:0;pointer-events:auto;border-radius:0;background:#fff2dfde;color:#88542f}
+.photo-grid[data-columns] .video-badge{bottom:4px;left:4px;right:auto;padding:3px;background:#0008;color:white;border-radius:3px}
+.photo-grid .add-card{aspect-ratio:1;align-self:stretch;border:0;border-radius:0;margin:0;padding:0}
+.processing-details{display:flex;gap:16px;flex-wrap:wrap;padding-block:16px}
+.processing-details .processing-state{min-width:44px;min-height:44px}
+@media(max-width:600px){.photo-grid[data-columns]{margin-inline:-6vw;width:100vw}}

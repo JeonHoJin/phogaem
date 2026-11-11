@@ -286,7 +286,7 @@ test('a failed album switch keeps the previous album and its photos together unt
   await expect(page.getByRole('heading', { name: '사진이 있는 여행 A', exact: true })).toBeVisible();
   await expect(page.getByLabel('공유보관함 선택', { exact: true })).toHaveValue(albumA);
   await expect(page.locator('article.photo-card')).toHaveCount(1);
-  await expect(page.locator('article.photo-card')).toContainText('album-a.png');
+  await expect(page.getByRole('button', { name: 'album-a.png 크게 보기', exact: true })).toBeVisible();
   await page.unroute(`${apiBase}/op/phogaem-album-get/v1?*`);
   await page.getByLabel('공유보관함 선택', { exact: true }).selectOption({ label: '새로운 여행 B' });
   await expect(page.getByRole('dialog', { name: '닉네임 설정', exact: true })).toHaveCount(0);

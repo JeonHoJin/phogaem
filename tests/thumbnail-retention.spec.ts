@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import type { Locator, Page, Route } from '@playwright/test';
+import { mkdir, copyFile } from 'node:fs/promises';
 
 const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
 const albumId = '30000000-0000-4000-8000-000000000001';
@@ -13,7 +14,7 @@ function gate() {
   return { held, release };
 }
 
-async function openShared(page: Page, count = 80, configure?: (model: {
+async function openShared(page: Page, count = 160, configure?: (model: {
   thumbnail: (route: Route, id: string) => Promise<void>;
 }) => void) {
   const model: { thumbnails: string[]; originals: string[]; thumbnail: (route: Route, id: string) => Promise<void> } = {
@@ -110,7 +111,7 @@ test('nearby offscreen thumbnails preload while distant photos and originals sta
 test('scrolling a cold album prioritizes newly visible thumbnails ahead of old offscreen prefetches', async ({ page }) => {
   const firstTransfers = gate();
   try {
-    const model = await openShared(page, 80, model => {
+    const model = await openShared(page, 160, model => {
       let started = 0;
       model.thumbnail = async route => {
         started += 1;
@@ -178,3 +179,53 @@ test('approval denial hides protected thumbnails and a late response cannot rest
     expect(model.originals).toEqual([]);
   } finally { late.release(); denied.release(); }
 });
+
+
+for (const viewport of [{ width: 390, height: 844 }, { width: 1920, height: 1080 }]) {
+  test(`media grid has square edge-to-edge cells without filename rows at ${viewport.width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await openShared(page, 12);
+    for (const columns of [2, 4, 6]) {
+      while (Number(await page.getByLabel('한 줄 사진 수').textContent()) > columns) await page.getByRole('button', { name: '사진 확대', exact: true }).click();
+      while (Number(await page.getByLabel('한 줄 사진 수').textContent()) < columns) await page.getByRole('button', { name: '사진 축소', exact: true }).click();
+      const grid = page.locator('.photo-grid');
+      const geometry = await grid.evaluate(element => {
+        const frames = [...element.querySelectorAll<HTMLElement>('.photo-frame')];
+        return {
+          grid: { left: element.getBoundingClientRect().left, right: element.getBoundingClientRect().right },
+          cells: frames.map(frame => {
+            const rect = frame.getBoundingClientRect();
+            return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height, radius: getComputedStyle(frame).borderRadius };
+          }),
+        };
+      });
+      const first = geometry.cells[0]!;
+      expect(Math.abs(first.width - first.height)).toBeLessThan(1);
+      expect(geometry.cells[1]!.left - first.right).toBeCloseTo(0, 1);
+      expect(geometry.cells[columns]!.top - first.bottom).toBeCloseTo(0, 1);
+      expect(first.left).toBeCloseTo(geometry.grid.left, 1);
+      expect(geometry.cells[columns - 1]!.right).toBeCloseTo(geometry.grid.right, 1);
+      expect(first.radius).toBe('0px');
+      const captionsPainted = await grid.locator('.photo-info, .photo-meta').evaluateAll(elements => elements.some(element => {
+        const style = getComputedStyle(element);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        // Screen-reader text may retain a 1px layout box while being fully clipped.
+        if (style.position === 'absolute' && style.clip.replace(/\s/g, '') === 'rect(0px,0px,0px,0px)') return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }));
+      expect(captionsPainted).toBe(false);
+      // Filename remains the accessible selection/open identity, not a visible caption.
+      await expect(cards(page).first().getByRole('button', { name: 'retention-1.png 선택', exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      if (viewport.width === 390) {
+        expect(geometry.grid.left).toBeCloseTo(0, 1);
+        expect(geometry.grid.right).toBeCloseTo(viewport.width, 1);
+      }
+    }
+    const screenshot = testInfo.outputPath(`dense-grid-${viewport.width}.png`);
+    await page.screenshot({ path: screenshot });
+    await mkdir('.local/dense-grid-verification', { recursive: true });
+    await copyFile(screenshot, `.local/dense-grid-verification/dense-grid-${viewport.width}.png`);
+  });
+}
