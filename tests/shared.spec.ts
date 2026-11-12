@@ -17,9 +17,11 @@ async function client<T>(page: Page, operation: string, payload: Record<string, 
       case 'create': return api.createAlbum(payload.title as string, '합성 멤버');
       case 'invite': return api.createInvite(payload.albumId as string);
       case 'join': return api.joinInvite(payload.token as string, '합성 멤버');
-      case 'get': return api.getAlbum(payload.albumId as string);
+      case 'get': return api.getAlbum(payload.albumId as string, payload.trashed === true);
+      case 'trash': return api.setSharedTrashState(payload.albumId as string, payload.photoIds as string[], payload.trashed === true);
+      case 'token': return server.token();
       case 'upload': return api.uploadSharedPhotos(payload.albumId as string, [new File([new Uint8Array(payload.bytes as number[])], payload.name as string, { type: (payload.type as string) ?? 'image/png' })]);
-      case 'blob': return Array.from(new Uint8Array(await (await api.getPhotoBlob(payload.albumId as string, payload.photoId as string)).arrayBuffer()));
+      case 'blob': return Array.from(new Uint8Array(await (await api.getPhotoBlob(payload.albumId as string, payload.photoId as string, payload.trashed === true)).arrayBuffer()));
       case 'state': return api.setSharedDownloadState(payload.albumId as string, payload.photoIds as string[], payload.state as 'requested' | 'received' | 'reset');
       case 'probe': {
         const response = await server.op(payload.op as string, { method: 'GET', version: 'v1', query: payload.query as Record<string, string>, headers: { 'x-mlhops-user-id': payload.forgedUser as string } });
@@ -66,6 +68,49 @@ async function connectApprovedUi(page: Page) {
   const manager = page.getByRole('dialog', { name: '공유보관함 관리' });
   await expect(manager.getByRole('button', { name: '만들기', exact: true })).toBeDisabled();
   await manager.getByLabel('닉네임', { exact: true }).fill('여행 주인');
+}
+
+async function verifyTrashRoundtrip(owner: Page, member: Page, outsider: Page) {
+  const album = await client<{ id: string }>(owner, 'create', { title: '휴지통 원본 격리 검증' });
+  const invite = await client<{ token: string }>(owner, 'invite', { albumId: album.id });
+  await client(member, 'join', { token: invite.token });
+  await client(member, 'upload', { albumId: album.id, name: 'member.png', bytes: imageBytes });
+  const ownerBytes = [...imageBytes, 7];
+  await client(owner, 'upload', { albumId: album.id, name: 'owner.png', bytes: ownerBytes });
+  const active = await client<{ photos: Array<{ id: string; name: string }> }>(member, 'get', { albumId: album.id });
+  const ownId = active.photos.find(photo => photo.name === 'member.png')!.id;
+  const otherId = active.photos.find(photo => photo.name === 'owner.png')!.id;
+  const memberToken = await client<string>(member, 'token');
+  const outsiderToken = await client<string>(outsider, 'token');
+  for (const [token, ids, status] of [[memberToken, [ownId, otherId], 403], [outsiderToken, [ownId], 404]] as const) {
+    const rejected = await member.request.post(`${apiBase}/op/phogaem-trash-set/v1`, {
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      data: { albumId: album.id, photoIds: ids, trashed: true },
+    });
+    expect(rejected.status()).toBe(status);
+  }
+  expect((await client<{ photos: unknown[] }>(member, 'get', { albumId: album.id })).photos).toHaveLength(2);
+  expect((await client<{ photos: unknown[] }>(member, 'get', { albumId: album.id, trashed: true })).photos).toHaveLength(0);
+  await client(member, 'trash', { albumId: album.id, photoIds: [ownId], trashed: true });
+  expect((await client<{ photos: Array<{ id: string }> }>(owner, 'get', { albumId: album.id })).photos.map(photo => photo.id)).toEqual([otherId]);
+  const bin = await client<{ photos: Array<{ id: string; trashedAt: number }> }>(member, 'get', { albumId: album.id, trashed: true });
+  expect(bin.photos).toHaveLength(1); expect(bin.photos[0]!.id).toBe(ownId); expect(bin.photos[0]!.trashedAt).toBeGreaterThan(0);
+  const query = new URLSearchParams({ albumId: album.id, photoId: ownId });
+  const hiddenOriginal = await member.request.get(`${apiBase}/op/phogaem-photo-get/v1?${query}`, { headers: { authorization: `Bearer ${memberToken}` } });
+  expect(hiddenOriginal.status()).toBe(404);
+  expect(await client(member, 'blob', { albumId: album.id, photoId: ownId, trashed: true })).toEqual(imageBytes);
+  const uploadQuery = new URLSearchParams({ albumId: album.id, name: 'same-again.png' });
+  const reupload = await member.request.post(`${apiBase}/op/phogaem-photo-upload/v1?${uploadQuery}`, {
+    headers: { authorization: `Bearer ${memberToken}`, 'content-type': 'image/png' }, data: Buffer.from(imageBytes),
+  });
+  expect(reupload.status()).toBe(409);
+  await client(member, 'trash', { albumId: album.id, photoIds: [ownId], trashed: false });
+  expect((await client<{ photos: unknown[] }>(member, 'get', { albumId: album.id })).photos).toHaveLength(2);
+  expect((await client<{ photos: unknown[] }>(member, 'get', { albumId: album.id, trashed: true })).photos).toHaveLength(0);
+  expect(await client(member, 'blob', { albumId: album.id, photoId: ownId })).toEqual(imageBytes);
+  await client(owner, 'trash', { albumId: album.id, photoIds: [ownId], trashed: true });
+  expect((await client<{ photos: unknown[] }>(member, 'get', { albumId: album.id, trashed: true })).photos).toHaveLength(1);
+  await client(member, 'trash', { albumId: album.id, photoIds: [ownId], trashed: false });
 }
 
 test('four real device-key users share two albums through gateway/core and preserve originals', async ({ browser }) => {
@@ -149,6 +194,10 @@ test('four real device-key users share two albums through gateway/core and prese
     expect((await client<typeof shared>(pages[2]!, 'get', { albumId: album.id })).photos[0]!.requestedBy).toEqual([]);
     const noAuth = await pages[3]!.request.get(`${apiBase}/op/phogaem-albums/v1`, { headers: { 'x-mlhops-user-id': identities[0]!.userId } });
     expect(noAuth.status()).toBe(401);
+
+    await test.step('trash isolates originals and preserves bytes across authorized restoration', async () => {
+      await verifyTrashRoundtrip(pages[0]!, pages[1]!, pages[3]!);
+    });
   } finally {
     await Promise.all(contexts.map(context => context.close()));
   }
@@ -307,7 +356,7 @@ test('approval gates all photo operations, invitations cannot bypass it, and rev
     ['phogaem-invite-join', 'POST'], ['phogaem-photo-upload', 'POST'],
     ['phogaem-photo-get', 'GET'], ['phogaem-download-state', 'POST'],
     ['phogaem-thumbnail-get', 'GET'], ['phogaem-processing-retry', 'POST'], ['phogaem-similar-get', 'GET'],
-    ['phogaem-member-name-set', 'POST'], ['phogaem-representative-set', 'POST'], ['phogaem-similar-exclude', 'POST'],
+    ['phogaem-member-name-set', 'POST'], ['phogaem-representative-set', 'POST'], ['phogaem-similar-exclude', 'POST'], ['phogaem-trash-set', 'POST'],
     ['phogaem-push-status', 'POST'], ['phogaem-push-subscribe', 'POST'],
     ['phogaem-push-unsubscribe', 'POST'], ['phogaem-push-message', 'POST'],
   ];

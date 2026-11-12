@@ -126,3 +126,36 @@ test('videos never match duplicate filters or collapse into photo candidate stac
   assert.deepEqual(stacks[1]!.photos, [first, second]);
   assert.deepEqual(representativeDownloadIds(['video', 'first', 'second'], stacks), ['video', 'first']);
 });
+
+test('trash is visible only through its explicit filter and never through normal duplicate filters', () => {
+  const active = photo({ id: 'active', contributors: ['me'], importCount: 3 });
+  const trashed = photo({ id: 'trashed', contributors: ['me'], importCount: 3, trashedAt: 10, trashedBy: 'me' });
+  const similar = new Set(['active', 'trashed']);
+  for (const filters of [['all'], ['mine'], ['others'], ['duplicates'], ['unreceived'], []] as const) {
+    assert.equal(matchesFilters(trashed, [...filters], 'me', similar), false);
+  }
+  assert.deepEqual(filterPhotos([active, trashed], 'all', 'me', similar), [active]);
+  assert.deepEqual(filterPhotos([active, trashed], 'trash', 'me', similar), [trashed]);
+  assert.equal(matchesFilters(active, ['trash'], 'me'), false);
+  assert.equal(matchesFilters(trashed, ['trash', 'duplicates'], 'me', similar), false);
+});
+
+test('trashed representatives cannot hide active originals or enter download normalization', () => {
+  const active = photo({ id: 'active' });
+  const trashed = photo({ id: 'trashed', trashedAt: 10 });
+  const other = photo({ id: 'other' });
+  const stacks = buildPhotoStacks([trashed, active, other], [{ id: 'old-group', photoIds: ['trashed', 'active', 'other'], representativeId: 'trashed' }]);
+  assert.deepEqual(stacks.map(stack => stack.representative.id), ['trashed', 'active']);
+  assert.deepEqual(stacks[0]!.photos, [trashed]);
+  assert.deepEqual(stacks[1]!.photos, [active, other]);
+  assert.deepEqual(representativeDownloadIds(['trashed', 'active', 'other'], stacks), ['active']);
+});
+
+test('a stale upload response cannot clear a trash tombstone', () => {
+  const trashed = photo({ trashedAt: 10, trashedBy: 'me' });
+  const incoming = photo({ trashedAt: undefined, trashedBy: undefined, importCount: 2 });
+  const [merged] = mergeUploadedPhoto([trashed], incoming);
+  assert.equal(merged!.trashedAt, 10);
+  assert.equal(merged!.trashedBy, 'me');
+  assert.equal(incoming.trashedAt, undefined);
+});

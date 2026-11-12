@@ -119,3 +119,83 @@ test('local repeated videos retain distinct records and bytes while photographs 
     else Reflect.deleteProperty(globalThis, 'indexedDB');
   }
 });
+
+test('local trash is a reversible atomic partition that retains originals and blocks stale imports/downloads', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'indexedDB');
+  type Photo = import('../apps/web/src/domain.ts').Photo;
+  const records = new Map<string, Photo>();
+  const db = {
+    onversionchange: null as (() => void) | null,
+    close() {},
+    transaction() {
+      const pending = new Map([...records].map(([id, photo]) => [id, structuredClone(photo)]));
+      let timer: ReturnType<typeof setTimeout>;
+      let aborted = false;
+      const transaction = {
+        oncomplete: null as (() => void) | null,
+        onabort: null as (() => void) | null,
+        error: null,
+        abort() { aborted = true; clearTimeout(timer); queueMicrotask(() => transaction.onabort?.()); },
+        objectStore: () => store,
+      };
+      const complete = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          if (aborted) return;
+          records.clear(); for (const [id, photo] of pending) records.set(id, structuredClone(photo));
+          transaction.oncomplete?.();
+        }, 0);
+      };
+      const request = <T,>(result: T) => {
+        const read = { result, onsuccess: null as (() => void) | null };
+        queueMicrotask(() => { if (!aborted) { read.onsuccess?.(); if (!aborted) complete(); } });
+        return read;
+      };
+      const store = {
+        get(id: string) { return request(pending.has(id) ? structuredClone(pending.get(id)) : undefined); },
+        getAll() { return request([...pending.values()].map(photo => structuredClone(photo))); },
+        add(photo: Photo) { assert.equal(pending.has(photo.id), false); pending.set(photo.id, structuredClone(photo)); complete(); },
+        put(photo: Photo) { pending.set(photo.id, structuredClone(photo)); complete(); },
+      };
+      return transaction;
+    },
+  };
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: { open() {
+    const request = { result: db, onsuccess: null as (() => void) | null };
+    queueMicrotask(() => request.onsuccess?.()); return request;
+  } } });
+  const modulePath = '../apps/web/src/storage.ts?trash-lifecycle';
+  const storage = await import(modulePath) as typeof import('../apps/web/src/storage.ts');
+  try {
+    const mine = new File(['mine original bytes'], 'mine.jpg', { type: 'image/jpeg' });
+    const foreign = new File(['friend original bytes'], 'friend.jpg', { type: 'image/jpeg' });
+    const mineId = (await storage.importPhotos([mine], 'me')).photos[0]!.id;
+    const foreignId = (await storage.importPhotos([foreign], 'mina')).photos.find(photo => photo.name === 'friend.jpg')!.id;
+    await storage.setDownloadState([mineId], 'me', 'requested');
+    await storage.setDownloadState([mineId], 'me', 'received');
+    const bin = await storage.setTrashState([mineId], 'me', true);
+    assert.deepEqual(bin.map(photo => photo.id), [mineId]);
+    assert.equal(bin[0]!.trashedBy, 'me'); assert.ok(bin[0]!.trashedAt);
+    assert.equal(await bin[0]!.blob!.text(), 'mine original bytes');
+    assert.deepEqual((await storage.loadPhotos()).map(photo => photo.id), [foreignId]);
+    assert.deepEqual(bin[0]!.receivedBy, ['me']);
+    await assert.rejects(storage.setTrashState([mineId, foreignId], 'me', false), /권한/);
+    await assert.rejects(storage.setTrashState([mineId, 'missing'], 'me', false), /권한/);
+    assert.deepEqual((await storage.loadPhotos(true)).map(photo => photo.id), [mineId]);
+    await assert.rejects(storage.importPhotos([new File(['new bytes'], 'new.jpg', { type: 'image/jpeg' }), mine], 'me'), /휴지통/);
+    assert.equal(records.size, 2, 'an aborted mixed import must not commit its earlier new file');
+    await assert.rejects(storage.setDownloadState([foreignId, mineId], 'me', 'requested'), /휴지통/);
+    assert.deepEqual(records.get(foreignId)!.requestedBy, [], 'a rejected batch must not record earlier downloads');
+    const restored = await storage.setTrashState([mineId], 'me', false);
+    assert.equal(restored.length, 2); assert.deepEqual(await storage.loadPhotos(true), []);
+    const restoredMine = restored.find(photo => photo.id === mineId)!;
+    assert.equal(restoredMine.trashedAt, undefined); assert.equal(restoredMine.trashedBy, undefined);
+    assert.equal(await restoredMine.blob!.text(), 'mine original bytes');
+    assert.deepEqual(restoredMine.receivedBy, ['me']);
+    assert.equal((await storage.importPhotos([mine], 'me')).duplicates, 1);
+  } finally {
+    db.onversionchange?.();
+    if (descriptor) Object.defineProperty(globalThis, 'indexedDB', descriptor);
+    else Reflect.deleteProperty(globalThis, 'indexedDB');
+  }
+});

@@ -16,6 +16,8 @@ export interface RemotePhoto {
   receivedBy: string[];
   importCount: number;
   processing?: PhotoProcessing;
+  trashedAt?: number;
+  trashedBy?: string;
 }
 export interface SharedAlbum { album: Album; members: SharedMember[]; photos: RemotePhoto[] }
 export interface SimilarGroup { id: string; photoIds: string[]; representativeId?: string }
@@ -71,8 +73,8 @@ export async function createAlbum(title: string, nickname?: string): Promise<Alb
   return (await json<{ album: Album }>('album-create', { title, ...(nickname !== undefined ? { nickname } : {}) })).album;
 }
 
-export function getAlbum(albumId: string): Promise<SharedAlbum> {
-  return json('album-get', undefined, { albumId, videoThumbnails: 'true' });
+export function getAlbum(albumId: string, trashed = false): Promise<SharedAlbum> {
+  return json('album-get', undefined, { albumId, videoThumbnails: 'true', ...(trashed ? { trashed: 'true' } : {}) });
 }
 
 export async function getSimilarPhotos(albumId: string): Promise<SimilarPhotos> {
@@ -265,12 +267,12 @@ function retryDelay(response: Response): number {
   return Math.min(3000, Math.max(350, Number.isFinite(delay) ? delay : 1000));
 }
 
-async function getImageBlob(operation: 'photo-get' | 'thumbnail-get', albumId: string, photoId: string, priority?: () => number): Promise<Blob> {
+async function getImageBlob(operation: 'photo-get' | 'thumbnail-get', albumId: string, photoId: string, priority?: () => number, trashed = false): Promise<Blob> {
   // The gateway allows 5 requests/sec per IP. Pace originals and keep at most two in flight;
   // metadata and mutations stay outside this queue. Only this idempotent GET retries a 429.
   for (let attempt = 0; ; attempt += 1) {
     const { response, blob } = await queuedOriginal(async () => {
-      const response = await server.op(`phogaem-${operation}`, { version: 'v1', method: 'GET', query: { albumId, photoId } });
+      const response = await server.op(`phogaem-${operation}`, { version: 'v1', method: 'GET', query: { albumId, photoId, ...(trashed ? { trashed: 'true' } : {}) } });
       return { response, blob: response.ok ? await response.blob() : undefined };
     }, operation === 'photo-get' ? () => -1 : () => Math.max(0, priority?.() ?? 0));
     if (response.status === 429 && attempt === 0) {
@@ -282,20 +284,20 @@ async function getImageBlob(operation: 'photo-get' | 'thumbnail-get', albumId: s
   }
 }
 
-export function getPhotoBlob(albumId: string, photoId: string): Promise<Blob> {
-  return getImageBlob('photo-get', albumId, photoId);
+export function getPhotoBlob(albumId: string, photoId: string, trashed = false): Promise<Blob> {
+  return getImageBlob('photo-get', albumId, photoId, undefined, trashed);
 }
 
-export function getThumbnailBlob(albumId: string, photoId: string, priority?: () => number): Promise<Blob> {
-  return getImageBlob('thumbnail-get', albumId, photoId, priority);
+export function getThumbnailBlob(albumId: string, photoId: string, priority?: () => number, trashed = false): Promise<Blob> {
+  return getImageBlob('thumbnail-get', albumId, photoId, priority, trashed);
 }
 
 export async function retryProcessing(albumId: string, photoId: string, kind: ProcessingKind): Promise<void> {
   await json('processing-retry', { albumId, photoId, kind });
 }
 
-export async function setSharedDownloadState(albumId: string, photoIds: string[], state: 'requested' | 'received' | 'reset'): Promise<void> {
-  await json('download-state', { albumId, photoIds, state });
+export async function setSharedDownloadState(albumId: string, photoIds: string[], state: 'requested' | 'received' | 'reset', trashed = false): Promise<void> {
+  await json('download-state', { albumId, photoIds, state, ...(trashed ? { trashed: true } : {}) });
 }
 
 
@@ -305,4 +307,8 @@ export function setRepresentative(albumId: string, groupId: string, photoId: str
 
 export function setMemberNickname(albumId: string, nickname: string, userId?: string): Promise<{ ok: boolean }> {
   return json('member-name-set', { albumId, nickname, ...(userId ? { userId } : {}) });
+}
+
+export async function setSharedTrashState(albumId: string, photoIds: string[], trashed: boolean): Promise<void> {
+  await json('trash-set', { albumId, photoIds, trashed });
 }

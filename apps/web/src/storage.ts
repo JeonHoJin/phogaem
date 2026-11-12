@@ -1,8 +1,8 @@
-import { fileMediaType, hashBlob, isVideo, MEMBERS } from './domain.ts';
+import { fileMediaType, hashBlob, isTrashed, isVideo, MEMBERS } from './domain.ts';
 import type { MemberId, Photo, PhotoFilter } from './domain.ts';
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
-const FILTERS: PhotoFilter[] = ['all', 'others', 'mine', 'duplicates', 'unreceived'];
+const FILTERS: PhotoFilter[] = ['all', 'others', 'mine', 'duplicates', 'unreceived', 'trash'];
 type Preferences = { filters: PhotoFilter[]; member: MemberId; columns?: number };
 
 function namespace(): string {
@@ -33,12 +33,12 @@ function storageError(error: DOMException | null): Error {
   return error ?? new Error('사진 저장에 실패했습니다. 브라우저 저장 공간과 권한을 확인해 주세요.');
 }
 
-export async function loadPhotos(): Promise<Photo[]> {
+export async function loadPhotos(trashed = false): Promise<Photo[]> {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
     const transaction = db.transaction('photos', 'readonly');
     const request = transaction.objectStore('photos').getAll();
-    transaction.oncomplete = () => resolve((request.result as Photo[]).sort((a, b) => b.createdAt - a.createdAt));
+    transaction.oncomplete = () => resolve((request.result as Photo[]).filter(photo => isTrashed(photo) === trashed).sort((a, b) => b.createdAt - a.createdAt));
     transaction.onabort = () => reject(storageError(transaction.error));
   });
 }
@@ -64,6 +64,7 @@ export async function importPhotos(files: File[], member: MemberId): Promise<{ a
   let duplicates = 0;
   await new Promise<void>((resolve, reject) => {
     const transaction = db.transaction('photos', 'readwrite');
+    let failure: Error | undefined;
     const store = transaction.objectStore('photos');
     let index = 0;
     const next = () => {
@@ -73,6 +74,9 @@ export async function importPhotos(files: File[], member: MemberId): Promise<{ a
       const request = store.get(id);
       request.onsuccess = () => {
         const existing = request.result as Photo | undefined;
+        if (existing && isTrashed(existing)) {
+          failure = new Error('휴지통의 사진은 먼저 복원해야 합니다.'); transaction.abort(); return;
+        }
         if (existing) {
           duplicates += 1;
           existing.importCount = (existing.importCount ?? existing.contributors.length) + 1;
@@ -90,7 +94,7 @@ export async function importPhotos(files: File[], member: MemberId): Promise<{ a
       };
     };
     transaction.oncomplete = () => resolve();
-    transaction.onabort = () => reject(storageError(transaction.error));
+    transaction.onabort = () => reject(failure ?? storageError(transaction.error));
     next();
   });
   return { added, duplicates, photos: await loadPhotos() };
@@ -100,12 +104,14 @@ export async function setDownloadState(ids: string[], member: MemberId, state: '
   const db = await openDatabase();
   await new Promise<void>((resolve, reject) => {
     const transaction = db.transaction('photos', 'readwrite');
+    let failure: Error | undefined;
     const store = transaction.objectStore('photos');
     for (const id of new Set(ids)) {
       const request = store.get(id);
       request.onsuccess = () => {
         const photo = request.result as Photo | undefined;
         if (!photo) return;
+        if (isTrashed(photo)) { failure = new Error('휴지통의 사진은 다운로드 대상에서 제외됩니다.'); transaction.abort(); return; }
         if (state === 'reset') {
           photo.requestedBy = photo.requestedBy.filter((id) => id !== member);
           photo.receivedBy = photo.receivedBy.filter((id) => id !== member);
@@ -116,9 +122,38 @@ export async function setDownloadState(ids: string[], member: MemberId, state: '
       };
     }
     transaction.oncomplete = () => resolve();
-    transaction.onabort = () => reject(storageError(transaction.error));
+    transaction.onabort = () => reject(failure ?? storageError(transaction.error));
   });
   return loadPhotos();
+}
+
+export async function setTrashState(ids: string[], member: MemberId, trashed: boolean): Promise<Photo[]> {
+  const unique = new Set(ids);
+  if (!unique.size || unique.size > 2000) throw new Error('사진 선택을 확인해 주세요.');
+  const db = await openDatabase();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.transaction('photos', 'readwrite');
+    const store = transaction.objectStore('photos');
+    let failure: Error | undefined;
+    const request = store.getAll();
+    request.onsuccess = () => {
+      const photos = (request.result as Photo[]).filter(photo => unique.has(photo.id));
+      if (photos.length !== unique.size || photos.some(photo => !photo.contributors.includes(member))) {
+        failure = new Error('이 사진을 휴지통으로 옮기거나 복원할 권한이 없습니다.'); transaction.abort(); return;
+      }
+      const now = Date.now();
+      for (const photo of photos) {
+        const updated = { ...photo };
+        if (trashed) {
+          if (!isTrashed(photo)) { updated.trashedAt = now; updated.trashedBy = member; }
+        } else { delete updated.trashedAt; delete updated.trashedBy; }
+        store.put(updated);
+      }
+    };
+    transaction.oncomplete = () => resolve();
+    transaction.onabort = () => reject(failure ?? storageError(transaction.error));
+  });
+  return loadPhotos(trashed);
 }
 
 export function loadPreferences(): Preferences {

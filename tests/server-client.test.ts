@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { ServerClient, ServerError, base64url, fromBase64url, deviceKeyFingerprint } from '../apps/web/src/server/client.ts';
 import type { KeyStore } from '../apps/web/src/server/client.ts';
 import { API_BASE, deviceKeyNamespace, server, validateApiBase } from '../apps/web/src/server/index.ts';
-import { excludeSimilarPhoto, getSimilarPhotos, setRepresentative, setMemberNickname, getAlbum, getPhotoBlob, getThumbnailBlob, retryProcessing, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, SHARED_MAX_VIDEO_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
+import { setSharedTrashState, excludeSimilarPhoto, getSimilarPhotos, setRepresentative, setMemberNickname, getAlbum, getPhotoBlob, getThumbnailBlob, retryProcessing, listAlbums, createAlbum, createInvite, joinInvite, setSharedDownloadState, uploadSharedPhotos, validateSharedFiles, SHARED_MAX_FILE_SIZE, SHARED_MAX_VIDEO_SIZE, ApprovalRequired, getUploadFailureIndex } from '../apps/web/src/server/api.ts';
 import { confirmPasskeyAccount, creationOptions, requestOptions, signInWithPasskey } from '../apps/web/src/server/passkey.ts';
 
 function memoryKeys() {
@@ -997,5 +997,39 @@ test('false-positive separation retains typed denial and rejects malformed candi
       server.op = async () => Response.json(value);
       await assert.rejects(excludeSimilarPhoto('album', 'group', 'photo'), error => error instanceof ServerError && error.status === 502);
     }
+  } finally { server.op = original; }
+});
+
+
+test('trash requests preserve explicit partitions, thumbnail priority and exact move/restore bodies', async () => {
+  const original = server.op;
+  const calls: Array<{ name: string; query?: Record<string, string>; body?: unknown }> = [];
+  try {
+    server.op = async (name, init) => {
+      calls.push({ name, query: init?.query, ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) });
+      assert.equal(init?.version, 'v1');
+      if (name === 'phogaem-album-get') return Response.json({ album: {}, members: [], photos: [] });
+      if (name === 'phogaem-trash-set') { assert.equal(init?.method, 'POST'); return Response.json({ ok: true }); }
+      return new Response('original bytes');
+    };
+    await getAlbum('album'); await getAlbum('album', true);
+    await getPhotoBlob('album', 'photo'); await getPhotoBlob('album', 'photo', true);
+    await getThumbnailBlob('album', 'photo', () => 1); await getThumbnailBlob('album', 'photo', () => 1, true);
+    await setSharedTrashState('album', ['photo'], true); await setSharedTrashState('album', ['photo'], false);
+    assert.deepEqual(calls.slice(0, 2).map(call => call.query), [
+      { albumId: 'album', videoThumbnails: 'true' },
+      { albumId: 'album', videoThumbnails: 'true', trashed: 'true' },
+    ]);
+    for (const offset of [2, 4]) {
+      assert.deepEqual(calls[offset]!.query, { albumId: 'album', photoId: 'photo' });
+      assert.deepEqual(calls[offset + 1]!.query, { albumId: 'album', photoId: 'photo', trashed: 'true' });
+    }
+    assert.deepEqual(calls.slice(6), [
+      { name: 'phogaem-trash-set', query: undefined, body: { albumId: 'album', photoIds: ['photo'], trashed: true } },
+      { name: 'phogaem-trash-set', query: undefined, body: { albumId: 'album', photoIds: ['photo'], trashed: false } },
+    ]);
+    server.op = async () => Response.json({ error: 'approval required' }, { status: 403 });
+    await assert.rejects(setSharedTrashState('album', ['photo'], true), ApprovalRequired);
+    await assert.rejects(getAlbum('album', true), ApprovalRequired);
   } finally { server.op = original; }
 });

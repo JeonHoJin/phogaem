@@ -19,6 +19,12 @@ export interface Photo {
   albumId?: string;
   importCount?: number;
   processing?: PhotoProcessing;
+  trashedAt?: number;
+  trashedBy?: MemberId;
+}
+
+export function isTrashed(photo: Pick<Photo, 'trashedAt'>): boolean {
+  return photo.trashedAt !== undefined && photo.trashedAt !== null;
 }
 
 export function isVideo(photo: Pick<Photo, 'type'>): boolean {
@@ -35,7 +41,7 @@ export function fileMediaType(file: Pick<File, 'name' | 'type'>): string | undef
   return !provided || provided === 'application/octet-stream' || normalized === expected ? expected : undefined;
 }
 
-export type PhotoFilter = 'all' | 'others' | 'mine' | 'duplicates' | 'unreceived';
+export type PhotoFilter = 'all' | 'others' | 'mine' | 'duplicates' | 'unreceived' | 'trash';
 
 export const MEMBERS: { id: MemberId; name: string; color: string }[] = [
   { id: 'me', name: '나', color: '#e1c1a8' },
@@ -49,12 +55,15 @@ export function filterPhotos(photos: Photo[], filter: PhotoFilter, member: Membe
 }
 
 export function matchesFilters(photo: Photo, filters: PhotoFilter[], member: MemberId, similarIds?: ReadonlySet<string>): boolean {
+  const trashed = isTrashed(photo);
+  if (trashed !== filters.includes('trash')) return false;
   return filters.every((filter) => {
     switch (filter) {
       case 'all': return true;
+      case 'trash': return trashed;
       case 'others': return !photo.contributors.includes(member);
       case 'mine': return photo.contributors.includes(member);
-      case 'duplicates': return !isVideo(photo) && ((photo.importCount ?? photo.contributors.length) > 1 || similarIds?.has(photo.id) === true);
+      case 'duplicates': return !trashed && !isVideo(photo) && ((photo.importCount ?? photo.contributors.length) > 1 || similarIds?.has(photo.id) === true);
       case 'unreceived': return !photo.receivedBy.includes(member);
       default: return false;
     }
@@ -93,6 +102,7 @@ export function mergeUploadedPhoto(photos: Photo[], incoming: Photo): Photo[] {
     contributors: [...new Set([...previous.contributors, ...incoming.contributors])],
     importCount: Math.max(previous.importCount ?? previous.contributors.length, incoming.importCount ?? incoming.contributors.length),
   } : incoming;
+  if (previous && isTrashed(previous) && !isTrashed(incoming)) { updated.trashedAt = previous.trashedAt; updated.trashedBy = previous.trashedBy; }
   return [updated, ...photos.filter(photo => photo.id !== incoming.id)].sort((a, b) => b.createdAt - a.createdAt);
 }
 
@@ -101,7 +111,7 @@ export interface PhotoGroup { id: string; photoIds: string[]; representativeId?:
 export interface PhotoStack { id: string; representative: Photo; photos: Photo[] }
 
 export function buildPhotoStacks(photos: Photo[], groups: PhotoGroup[]): PhotoStack[] {
-  const known = new Map(photos.filter(photo => !isVideo(photo)).map(photo => [photo.id, photo]));
+  const known = new Map(photos.filter(photo => !isVideo(photo) && !isTrashed(photo)).map(photo => [photo.id, photo]));
   const grouped = new Map<string, PhotoStack>();
   for (const group of groups) {
     const members = group.photoIds.map(id => known.get(id)).filter((photo): photo is Photo => !!photo);
@@ -120,6 +130,6 @@ export function buildPhotoStacks(photos: Photo[], groups: PhotoGroup[]): PhotoSt
 }
 
 export function representativeDownloadIds(ids: string[], stacks: PhotoStack[]): string[] {
-  const representative = new Map(stacks.flatMap(stack => stack.photos.map(photo => [photo.id, stack.representative.id] as const)));
+  const representative = new Map(stacks.filter(stack => !isTrashed(stack.representative)).flatMap(stack => stack.photos.filter(photo => !isTrashed(photo)).map(photo => [photo.id, stack.representative.id] as const)));
   return [...new Set(ids.map(id => representative.get(id)).filter((id): id is string => !!id))];
 }

@@ -224,9 +224,9 @@ for (const outcome of ['success', 'failure'] as const) {
     await page.route('**/src/storage.ts*', async route => {
       const response = await route.fetch();
       const body = await response.text();
-      const signature = 'export async function loadPhotos() {';
-      expect(body).toContain(signature);
-      await route.fulfill({ response, body: body.replace(signature,
+      const signature = body.match(/export async function loadPhotos\([^)]*\) \{/)?.[0];
+      expect(signature).toBeDefined();
+      await route.fulfill({ response, body: body.replace(signature!,
         `${signature}\nawait window.__initialReadGate;\n${outcome === 'failure' ? 'throw new Error("synthetic unavailable storage");' : ''}`) });
     });
     await page.goto('./#invite=synthetic-invitation');
