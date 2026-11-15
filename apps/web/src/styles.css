@@ -120,3 +120,8 @@
 @media(max-width:600px){.photo-grid[data-columns]{margin-inline:-6vw;width:100vw}}
 
 .tray-actions{flex-wrap:wrap;justify-content:flex-end}.download-tray{gap:12px}.download-tray .button{min-height:44px}.viewer-actions{flex-wrap:wrap}.viewer-actions .icon-button{min-width:44px;min-height:44px}@media(max-width:600px){.download-tray{padding:10px;gap:8px}.tray-actions{gap:6px}.tray-actions .button{padding-inline:10px}.tray-actions .text-button{min-height:44px}}
+
+/* Bulk upload controls keep the gallery and file queue bounded. */
+.batch-status{pointer-events:auto;width:min(460px,calc(100% - 32px));padding:10px 12px;gap:10px}.batch-status>.icon-button{min-width:44px;min-height:44px;padding:0}.batch-meters{flex:1;min-width:0}.batch-meters>div{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}.batch-meters output{font-size:12px}.batch-meters progress{display:block;width:100%;margin-top:7px}.queue-toolbar,.queue-actions,.queue-pagination{display:flex;align-items:center;gap:8px}.queue-toolbar{justify-content:space-between;flex-wrap:wrap}.queue-toolbar>.text-button{display:flex;align-items:center;gap:8px;min-height:44px}.queue-actions .icon-button,.queue-item .icon-button,.queue-pagination .icon-button{min-width:44px;min-height:44px;padding:0}.queue-files{max-height:280px;overflow:auto;overscroll-behavior:contain}.queue-item[data-rejected]{color:#88542f}.queue-pagination{justify-content:center;padding-top:8px;font-variant-numeric:tabular-nums}.upload-queue{padding:8px 12px}.queue-item>span:last-of-type{white-space:nowrap}.app-shell:has(.batch-status){padding-bottom:110px}
+
+.app-shell:has(.batch-status) .download-tray{bottom:calc(100px + env(safe-area-inset-bottom))}

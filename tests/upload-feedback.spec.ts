@@ -45,7 +45,8 @@ async function openShared(page: Page, initialCount = 0) {
       const name = url.searchParams.get('name')!;
       model.uploads.push(name);
       await model.upload(route, name);
-    } else throw new Error(`Unexpected synthetic operation: ${operation}`);
+    } else if (operation === 'phogaem-push-status') await route.fulfill({ json: { enabled: false, publicKey: '' } });
+    else throw new Error(`Unexpected synthetic operation: ${operation}`);
   });
   await page.goto('./');
   await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
@@ -114,6 +115,7 @@ test('parallel completion updates feedback immediately and keeps N/N visible unt
     await expect(page.getByRole('status', { name: '사진 업로드 중', exact: true })).toContainText('1/2');
     await expect(page.locator('article.photo-card')).toHaveCount(1);
     const queue = page.getByRole('region', { name: '업로드 파일', exact: true });
+    await queue.getByRole('button', { name: '대기열', exact: true }).click();
     await expect(queue).toContainText('first.png');
     await expect(queue).not.toContainText('second.png');
     expect(finalRead).toBe(false);
@@ -125,6 +127,11 @@ test('parallel completion updates feedback immediately and keeps N/N visible unt
     await expect(page.getByRole('status', { name: /사진 (준비|업로드|목록 갱신) 중/ })).toHaveCount(0);
     await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
     await expect(page.locator('article.photo-card')).toHaveCount(2);
+    const completed = page.getByRole('status', { name: '업로드 완료', exact: true });
+    await expect(completed.getByLabel('완료 파일', { exact: true })).toHaveText('2/2');
+    await expect(completed.getByLabel('완료 용량', { exact: true })).toHaveText(`${pixel.length * 2} B / ${pixel.length * 2} B`);
+    await completed.getByRole('button', { name: '업로드 상태 닫기', exact: true }).click();
+    await expect(completed).toHaveCount(0);
   } finally { first.release(); second.release(); metadata.release(); }
 });
 
@@ -155,7 +162,7 @@ test('selection still completes when animation frames stop firing', async ({ pag
   expect(model.uploads).toEqual(['background.png']);
 });
 
-test('a large busy queue is bounded and every uncommitted file becomes removable after failure', async ({ page }) => {
+test('a large queue stays collapsed and paginated through failure with every pending file reachable', async ({ page }) => {
   const model = await openShared(page);
   const pending = gate();
   model.upload = async route => { await pending.held; await route.fulfill({ status: 503, json: { error: 'synthetic failure' } }); };
@@ -163,13 +170,24 @@ test('a large busy queue is bounded and every uncommitted file becomes removable
     await page.getByLabel('사진 파일 선택').setInputFiles(Array.from({ length: 40 }, (_, index) => file(`batch-${index}.png`)));
     const queue = page.getByRole('region', { name: '업로드 파일', exact: true });
     await expect(page.getByRole('status', { name: '사진 업로드 중', exact: true })).toContainText('0/40');
+    const toggle = queue.getByRole('button', { name: '대기열', exact: true });
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await expect(queue.locator('.queue-item')).toHaveCount(0);
+    await toggle.click();
     await expect(queue.locator('.queue-item')).toHaveCount(32);
-    await expect(queue.getByLabel('나머지 파일', { exact: true })).toHaveText('+8');
+    await expect(queue.getByRole('navigation', { name: '대기열 페이지', exact: true })).toContainText('1/2');
     pending.release();
     await expect(page.getByRole('group', { name: '작업 실패', exact: true })).toBeVisible();
     await expect(page.getByRole('status', { name: /사진 (준비|업로드|목록 갱신) 중/ })).toHaveCount(0);
-    await expect(queue.locator('.queue-item')).toHaveCount(40);
-    await expect(queue.getByRole('button', { name: 'batch-39.png 대기열에서 제거', exact: true })).toBeVisible();
+    await expect(queue.locator('.queue-item')).toHaveCount(32);
+    await queue.getByRole('button', { name: '다음 파일', exact: true }).click();
+    await expect(queue.locator('.queue-item')).toHaveCount(8);
+    const remove = queue.getByRole('button', { name: 'batch-39.png 대기열에서 제거', exact: true });
+    await expect(remove).toBeVisible();
+    await remove.click();
+    await expect(remove).toHaveCount(0);
+    await expect(queue.getByRole('button', { name: '대기열', exact: true })).toContainText('39');
+    await expect(page.getByRole('status', { name: '업로드 중단', exact: true }).getByLabel('완료 파일', { exact: true })).toHaveText('0/39');
     await expect(page.locator('article.photo-card')).toHaveCount(0);
     expect(model.uploads.length).toBeLessThanOrEqual(2);
   } finally { pending.release(); }
@@ -182,6 +200,7 @@ test('invalid mixed selection clears preparation and rejects the whole batch bef
   await expect(page.getByRole('status', { name: /사진 (준비|업로드|목록 갱신) 중/ })).toHaveCount(0);
   await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
   expect(model.uploads).toEqual([]);
+  await page.getByRole('region', { name: '업로드 파일', exact: true }).getByRole('button', { name: '대기열', exact: true }).click();
   await expect(page.getByRole('button', { name: 'invalid.txt 대기열에서 제거', exact: true })).toBeVisible();
 });
 
@@ -202,10 +221,114 @@ test('upload approval denial clears feedback immediately and late in-flight succ
     await expect(page.getByRole('status', { name: /사진 (준비|업로드|목록 갱신) 중/ })).toHaveCount(0);
     await expect(page.locator('article.photo-card')).toHaveCount(0);
     await expect(page.getByRole('region', { name: '업로드 파일', exact: true })).toHaveCount(0);
+    await expect(page.locator('.batch-status')).toHaveCount(0);
     late.release();
     await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
     await expect(page.getByRole('region', { name: '계정 승인 대기', exact: true })).toBeVisible();
     await expect(page.locator('article.photo-card')).toHaveCount(0);
     await expect(page.getByRole('status', { name: /사진 (준비|업로드|목록 갱신) 중/ })).toHaveCount(0);
   } finally { late.release(); denied.release(); }
+});
+
+
+test('four hundred files pause after out-of-order in-flight commits and resume only the remainder', async ({ page }) => {
+  const model = await openShared(page);
+  const first = gate(); const second = gate(); const resumed = gate();
+  const commit = model.upload;
+  model.upload = async (route, name) => {
+    await (name === 'bulk-0.png' ? first : name === 'bulk-1.png' ? second : resumed).held;
+    await commit(route, name);
+  };
+  try {
+    await page.getByLabel('사진 파일 선택').setInputFiles(Array.from({ length: 400 }, (_, index) => file(`bulk-${index}.png`)));
+    await expect.poll(() => model.uploads.length).toBe(2);
+    const uploading = page.getByRole('status', { name: '사진 업로드 중', exact: true });
+    await expect(uploading.getByLabel('완료 파일', { exact: true })).toHaveText('0/400');
+    const pause = uploading.getByRole('button', { name: '업로드 일시정지', exact: true });
+    await pause.click();
+    await expect(pause).toBeDisabled();
+    second.release();
+    await expect(uploading.getByLabel('완료 파일', { exact: true })).toHaveText('1/400');
+    await expect(page.locator('article.photo-card')).toHaveCount(1);
+    await expect(page.locator('main')).toHaveAttribute('aria-busy', 'true');
+    first.release();
+    const paused = page.getByRole('status', { name: '업로드 일시정지', exact: true });
+    await expect(paused.getByLabel('완료 파일', { exact: true })).toHaveText('2/400');
+    await expect(paused.getByLabel('완료 용량', { exact: true })).toContainText(`${pixel.length * 2} B /`);
+    await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
+    expect(model.uploads).toEqual(['bulk-0.png', 'bulk-1.png']);
+    await expect(page.locator('article.photo-card')).toHaveCount(2);
+    await paused.getByRole('button', { name: '업로드 계속', exact: true }).click();
+    await expect.poll(() => model.uploads.length).toBe(4);
+    expect(model.uploads.slice(2)).toEqual(['bulk-2.png', 'bulk-3.png']);
+    await uploading.getByRole('button', { name: '업로드 일시정지', exact: true }).click();
+    resumed.release();
+    await expect(paused.getByLabel('완료 파일', { exact: true })).toHaveText('4/400');
+    await expect(paused.getByLabel('완료 용량', { exact: true })).toContainText(`${pixel.length * 4} B /`);
+    await expect(page.locator('article.photo-card')).toHaveCount(4);
+    expect(model.uploads).toHaveLength(4);
+    await page.getByRole('button', { name: '대기열 비우기', exact: true }).click();
+    await expect(page.getByRole('region', { name: '업로드 파일', exact: true })).toHaveCount(0);
+    await expect(page.locator('.batch-status')).toHaveCount(0);
+    await expect(page.locator('article.photo-card')).toHaveCount(4);
+  } finally { first.release(); second.release(); resumed.release(); }
+});
+
+test('mobile bulk queue remains bounded and its fixed controls show committed bytes without overflow', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const model = await openShared(page);
+  const pending = gate();
+  const commit = model.upload;
+  model.upload = async (route, name) => { await pending.held; await commit(route, name); };
+  try {
+    await page.getByLabel('사진 파일 선택').setInputFiles(Array.from({ length: 400 }, (_, index) => file(`mobile-${index}-${'long-'.repeat(20)}.png`)));
+    await expect.poll(() => model.uploads.length).toBe(2);
+    const queue = page.getByRole('region', { name: '업로드 파일', exact: true });
+    await expect(queue.locator('.queue-item')).toHaveCount(0);
+    await queue.getByRole('button', { name: '대기열', exact: true }).click();
+    await expect(queue.locator('.queue-item')).toHaveCount(32);
+    expect(await queue.locator('.queue-files').evaluate(element => element.clientHeight)).toBeLessThanOrEqual(280);
+    const status = page.getByRole('status', { name: '사진 업로드 중', exact: true });
+    await expect(status).toBeInViewport({ ratio: 1 });
+    const pause = status.getByRole('button', { name: '업로드 일시정지', exact: true });
+    const box = await pause.boundingBox();
+    expect(box!.width).toBeGreaterThanOrEqual(44); expect(box!.height).toBeGreaterThanOrEqual(44);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await expect(page.locator('p:visible, [title]')).toHaveCount(0);
+    await pause.click(); pending.release();
+    const paused = page.getByRole('status', { name: '업로드 일시정지', exact: true });
+    await expect(paused.getByLabel('완료 파일', { exact: true })).toHaveText('2/400');
+    await expect(paused.getByLabel('완료 용량', { exact: true })).toContainText(`${pixel.length * 2} B /`);
+    await queue.getByRole('button', { name: '다음 파일', exact: true }).click();
+    await expect(queue.getByRole('navigation', { name: '대기열 페이지', exact: true })).toContainText('2/13');
+    const remove = queue.locator('.queue-item').last().getByRole('button', { name: /대기열에서 제거/ });
+    await remove.click();
+    await expect(paused.getByLabel('완료 파일', { exact: true })).toHaveText('2/399');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: '.local/bulk-upload-mobile.png', fullPage: true });
+    await page.getByRole('button', { name: '대기열 비우기', exact: true }).click();
+  } finally { pending.release(); }
+});
+
+
+test('changing the local preview user clears a failed pending batch and its old resume action', async ({ page }) => {
+  const authRequests: string[] = [];
+  page.on('request', request => { if (new URL(request.url()).pathname.startsWith('/auth/')) authRequests.push(request.url()); });
+  await page.goto('./');
+  await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
+  await page.getByRole('button', { name: '기기 보관함', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '기기 보관함', exact: true })).toBeVisible();
+  await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
+  await page.getByLabel('사진 파일 선택').setInputFiles([file('local.png'), { name: 'invalid.txt', mimeType: 'text/plain', buffer: Buffer.from('synthetic') }]);
+  await expect(page.getByRole('status', { name: '업로드 중단', exact: true })).toBeVisible();
+  await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.getByRole('region', { name: '업로드 파일', exact: true })).toBeVisible();
+  await page.getByLabel('미리보기 사용자', { exact: true }).selectOption('mina');
+  await expect(page.getByRole('region', { name: '업로드 파일', exact: true })).toHaveCount(0);
+  await expect(page.locator('.batch-status')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '남은 파일 다시 올리기', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: '작업 실패', exact: true })).toHaveCount(0);
+  await expect(page.locator('article.photo-card')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '올리기', exact: true })).toBeEnabled();
+  expect(authRequests).toEqual([]);
 });

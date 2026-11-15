@@ -377,7 +377,7 @@ test('photo API uses encoded flat op queries, raw originals and separate metadat
     assert.deepEqual(details.photos, []);
     assert.equal(transport.calls.filter(call => call.url.includes('/op/')).length, 1, 'listing metadata must not download any originals');
     const file = new File(['exact original'], '여행 & 한 장.HEIC');
-    assert.deepEqual(await uploadSharedPhotos('album +&', [file]), { added: 1, duplicates: 0 });
+    assert.deepEqual(await uploadSharedPhotos('album +&', [file]), { added: 1, duplicates: 0, interrupted: false });
     assert.equal(await (await getPhotoBlob('album +&', 'id &')).text(), 'exact original');
     assert.equal(transport.tokens, 1);
   } finally { server.op = originalOp; }
@@ -726,8 +726,8 @@ test('parallel uploads overlap at most two globally and report actual out-of-ord
     release.get('0.png')!();
     await waitForUpload(() => release.has('3.png'));
     release.get('2.png')!(); release.get('3.png')!();
-    assert.deepEqual(await first, { added: 2, duplicates: 1 });
-    assert.deepEqual(await second, { added: 1, duplicates: 0 });
+    assert.deepEqual(await first, { added: 2, duplicates: 1, interrupted: false });
+    assert.deepEqual(await second, { added: 1, duplicates: 0, interrupted: false });
     assert.equal(maximum, 2);
     assert.deepEqual(updates, [
       { completed: 1, index: 1, indices: [1], photo: 'photo-1' },
@@ -739,6 +739,60 @@ test('parallel uploads overlap at most two globally and report actual out-of-ord
     for (const resolve of release.values()) resolve();
     await Promise.allSettled([first, second]); server.op = originalOp;
   }
+});
+
+test('stopping a large upload drains in-flight writes and resumes only uncommitted files', async () => {
+  const originalOp = server.op;
+  const started: string[] = [];
+  const release = new Map<string, () => void>();
+  const completed = new Set<number>();
+  let stop = false;
+  let resumed = false;
+  server.op = async (_name, init) => {
+    const name = init!.query!.name!;
+    started.push(name);
+    if (!resumed) await new Promise<void>(resolve => release.set(name, resolve));
+    return Response.json({ added: true, photo: uploadFixture(Number(name.split('.')[0])) });
+  };
+  const files = Array.from({ length: 400 }, (_, index) => new File(['x'], `${index}.png`));
+  let settled = false;
+  const batch = uploadSharedPhotos('album', files, (_count, event) => {
+    event.completedIndices.forEach(index => completed.add(index));
+  }, undefined, { shouldStop: () => stop }).finally(() => { settled = true; });
+  try {
+    await waitForUpload(() => release.size === 2);
+    stop = true;
+    release.get('1.png')!();
+    await waitForUpload(() => completed.has(1));
+    assert.equal(settled, false, 'stop waits for every already-started write');
+    assert.deepEqual(started, ['0.png', '1.png']);
+    release.get('0.png')!();
+    assert.deepEqual(await batch, { added: 2, duplicates: 0, interrupted: true });
+    assert.deepEqual([...completed].sort(), [0, 1]);
+    assert.equal(started.length, 2, 'queued files do not start after stop');
+    const remaining = files.filter((_, index) => !completed.has(index));
+    assert.equal(remaining.length, 398);
+    // A new call owns resumption. Limit this transport check to the next two files;
+    // the retained indices above prove all other originals remain in the pending set.
+    resumed = true; stop = false;
+    assert.deepEqual(await uploadSharedPhotos('album', remaining.slice(0, 2), undefined, undefined, { shouldStop: () => stop }),
+      { added: 2, duplicates: 0, interrupted: false });
+    assert.deepEqual(started, ['0.png', '1.png', '2.png', '3.png']);
+  } finally {
+    for (const resolve of release.values()) resolve();
+    await batch; server.op = originalOp;
+  }
+});
+
+test('an already stopped upload schedules no writes and reports pending work without failure', async () => {
+  const originalOp = server.op;
+  let calls = 0;
+  server.op = async () => { calls += 1; return Response.json({ added: true }); };
+  try {
+    assert.deepEqual(await uploadSharedPhotos('album', [new File(['x'], 'pending.png')], undefined, undefined, { shouldStop: () => true }),
+      { added: 0, duplicates: 0, interrupted: true });
+    assert.equal(calls, 0);
+  } finally { server.op = originalOp; }
 });
 
 test('upload failure stops queued writes and drains successful in-flight writes before reporting retry indices', async () => {
@@ -947,7 +1001,7 @@ test('shared videos preserve raw bodies, accept camera MIME fallback and remain 
   try {
     const video = new File(['exact video bytes'], 'trip.MOV', { type: 'application/octet-stream' });
     const result = await uploadSharedPhotos('album', [video, video]);
-    assert.deepEqual(result, { added: 2, duplicates: 0 });
+    assert.deepEqual(result, { added: 2, duplicates: 0, interrupted: false });
     assert.equal(uploads.length, 2);
     for (const upload of uploads) {
       assert.equal(upload.name, 'trip.MOV'); assert.equal(upload.type, 'video/quicktime');

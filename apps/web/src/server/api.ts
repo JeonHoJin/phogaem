@@ -179,7 +179,7 @@ function queuedUpload(run: () => Promise<void>, cancelled: () => boolean): Promi
   return new Promise((resolve, reject) => { uploadQueue.push({ run, cancelled, resolve, reject }); pumpUploads(); });
 }
 
-export async function uploadSharedPhotos(albumId: string, files: File[], onProgress?: (completed: number, event: UploadProgress) => void, onFailure?: (error: unknown, index: number) => void): Promise<{ added: number; duplicates: number }> {
+export async function uploadSharedPhotos(albumId: string, files: File[], onProgress?: (completed: number, event: UploadProgress) => void, onFailure?: (error: unknown, index: number) => void, control?: { shouldStop?: () => boolean }): Promise<{ added: number; duplicates: number; interrupted: boolean }> {
   // Reject an invalid batch before scheduling any writes. Each successful file is committed
   // independently; out-of-order completions report their actual indices, never a prefix.
   validateSharedFiles(files);
@@ -187,7 +187,8 @@ export async function uploadSharedPhotos(albumId: string, files: File[], onProgr
   let duplicates = 0;
   const completedIndices = new Set<number>();
   const failures: Array<{ error: unknown; index: number }> = [];
-  await Promise.allSettled(files.map((file, index) => queuedUpload(async () => {
+  const stopped = () => failures.length > 0 || control?.shouldStop?.() === true;
+  await Promise.allSettled(files.map((file, index) => stopped() ? Promise.resolve() : queuedUpload(async () => {
     try {
       const response = await server.op('phogaem-photo-upload', {
         version: 'v1', method: 'POST', query: { albumId, name: file.name, videoThumbnails: 'true' },
@@ -206,7 +207,7 @@ export async function uploadSharedPhotos(albumId: string, files: File[], onProgr
       try { onFailure?.(error, index); } catch { /* observation must not affect upload state */ }
       throw error;
     }
-  }, () => failures.length > 0)));
+  }, stopped)));
   // In-flight writes may already have committed. Drain all of them before returning or
   // throwing so callers can safely retain only uncommitted files and clear revoked access.
   const failure = failures.find(item => item.error instanceof ApprovalRequired) ?? failures[0];
@@ -221,7 +222,7 @@ export async function uploadSharedPhotos(albumId: string, files: File[], onProgr
     if (error !== null && typeof error === 'object') uploadFailureIndices.set(error, failure.index);
     throw error;
   }
-  return { added, duplicates };
+  return { added, duplicates, interrupted: completedIndices.size < files.length };
 }
 
 interface OriginalResult { response: Response; blob?: Blob }
