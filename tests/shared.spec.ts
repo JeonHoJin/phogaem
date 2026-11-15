@@ -547,10 +547,11 @@ test('a partially failed shared upload shows committed photos and retries only t
   await expect(page.getByRole('group', { name: '작업 실패' })).toBeVisible();
   await expect(page.locator('article.photo-card')).toHaveCount(1);
   const queue = page.getByRole('region', { name: '업로드 파일' });
+  await queue.getByRole('button', { name: '대기열', exact: true }).click();
   await expect(queue).toContainText('retry.png');
   await expect(queue).not.toContainText('committed.png');
   await expect(page.locator('p:visible, [title]')).toHaveCount(0);
-  await queue.getByRole('button', { name: '올리기', exact: true }).click();
+  await queue.getByRole('button', { name: '다시 올리기', exact: true }).click();
   await expect(page.locator('article.photo-card')).toHaveCount(2);
   await expect(queue).toHaveCount(0);
   expect(attempts).toBe(3);
@@ -624,6 +625,7 @@ test('parallel completions update photos and the remaining queue before the batc
     await expect(page.locator('article.photo-card')).toHaveCount(1);
     await expect(page.getByRole('main')).toHaveAttribute('aria-busy', 'true');
     const queue = page.getByRole('region', { name: '업로드 파일' });
+    await queue.getByRole('button', { name: '대기열', exact: true }).click();
     await expect(queue).toContainText('slow-first.png');
     await expect(queue).not.toContainText('fast-second.png');
     expect(albumReads).toBe(0);
@@ -640,6 +642,7 @@ test('parallel completions update photos and the remaining queue before the batc
     await expect(fastCard.getByLabel('중복 2', { exact: true })).toBeVisible();
     await expect(page.locator('article.photo-card')).toHaveCount(2);
     await expect(page.getByRole('main')).toHaveAttribute('aria-busy', 'true');
+    await queue.getByRole('button', { name: '대기열', exact: true }).click();
     await expect(queue).toContainText('held-third.png');
     await expect(queue).not.toContainText('fast-renamed-duplicate.png');
     releaseThird();

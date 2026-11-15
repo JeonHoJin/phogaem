@@ -22,7 +22,8 @@ async function seed(page: Page) {
 async function upload(page: Page, name = 'original.png', buffer = pixel, mimeType = 'image/png') {
   await expect(page.getByRole('main')).toHaveAttribute('aria-busy', 'false');
   await page.getByLabel('사진 파일 선택').setInputFiles({ name, mimeType, buffer });
-  await expect(page.getByRole('progressbar', { name: '업로드' })).toHaveCount(0);
+  await expect(page.getByRole('status', { name: '업로드 완료', exact: true })).toBeVisible();
+  await expect(page.getByRole('main')).toHaveAttribute('aria-busy', 'false');
   await expect(page.getByRole('group', { name: '작업 실패' })).toHaveCount(0);
 }
 
@@ -100,7 +101,7 @@ test('mixed invalid upload is rejected atomically and HEIC keeps its original wi
     { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('not an image') },
   ]);
   await expect(page.getByRole('group', { name: '작업 실패' })).toBeVisible();
-  await expect(page.getByRole('button', { name: '다시 선택' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '대기열 비우기' })).toBeEnabled();
   await expect(cards(page)).toHaveCount(0);
   await page.reload();
   await page.getByRole('button', { name: '기기 보관함', exact: true }).click();
@@ -248,8 +249,9 @@ test('local upload rejects MIME disguises and accepts camera files with unspecif
     name: 'disguised.jpg', mimeType: 'text/html', buffer: Buffer.from('<script>throw new Error("not a photo")</script>'),
   });
   await expect(page.getByRole('group', { name: '작업 실패' })).toBeVisible();
-  await expect(page.getByRole('button', { name: '다시 선택' })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '대기열 비우기' })).toBeEnabled();
   await expect(cards(page)).toHaveCount(0);
+  await page.getByRole('button', { name: '대기열 비우기', exact: true }).click();
   await upload(page, 'camera.HEIC', Buffer.from('synthetic HEIC original'), '');
   await upload(page, 'camera.png', pixel, 'application/octet-stream');
   await expect(cards(page)).toHaveCount(2);
@@ -274,11 +276,12 @@ test('entry, empty library and rejected files use actions instead of visible gui
   await page.getByLabel('사진 파일 선택').setInputFiles({ name: 'bad.html', mimeType: 'text/html', buffer: Buffer.from('<h1>synthetic</h1>') });
   const failure = page.getByRole('group', { name: '작업 실패' });
   await expect(failure).toBeVisible();
-  await expect(failure.getByRole('button', { name: '다시 선택', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '대기열 비우기', exact: true })).toBeEnabled();
   await expect(page.locator('p:visible, [title]')).toHaveCount(0);
   expect(await failure.innerText()).not.toMatch(/지원하는|선택해|실패했|다시 시도해/);
-  await expect(page.getByRole('region', { name: '업로드 파일' }).getByRole('button', { name: '올리기', exact: true })).toBeDisabled();
+  await expect(page.getByRole('region', { name: '업로드 파일' }).getByRole('button', { name: '다시 올리기', exact: true })).toBeDisabled();
   await expect(failure.getByRole('button', { name: '재시도', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: '대기열 비우기', exact: true }).click();
   await upload(page);
   await expect(cards(page)).toHaveCount(1);
   await expect(failure).toHaveCount(0);
