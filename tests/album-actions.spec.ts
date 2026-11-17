@@ -41,7 +41,7 @@ async function sharedAlbum(page: Page, { owner = true, title = '친구들과 함
   });
   await page.goto('./');
   await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
-  await page.getByRole('button', { name: '시작', exact: true }).click();
+  await page.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
   return { model, album, open: () => page.getByRole('button', { name: title, exact: false }).click() };
 }
 

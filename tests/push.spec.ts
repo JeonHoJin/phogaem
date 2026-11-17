@@ -76,7 +76,7 @@ async function mockBackend(context: BrowserContext) {
 async function openAlbum(page: Page) {
   await page.goto('./');
   await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
-  await page.getByRole('button', { name: '시작', exact: true }).click();
+  await page.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
   await page.getByRole('button', { name: '알림 여행 1', exact: false }).click();
 }
 
@@ -121,7 +121,7 @@ test('notification deep links open the authorized album after ordinary account r
   await mockPermission(page); await mockBackend(context);
   await page.goto(`./#album=${albumB}`);
   await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
-  await page.getByRole('button', { name: '시작', exact: true }).click();
+  await page.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
   await expect(page.getByRole('heading', { name: '알림 여행 2' })).toBeVisible();
 });
 

@@ -233,11 +233,11 @@ for (const outcome of ['success', 'failure'] as const) {
     await page.goto('./#invite=synthetic-invitation');
     await page.reload();
     const manager = page.getByRole('dialog', { name: '공유보관함 관리' });
-    await expect(manager.getByRole('button', { name: '시작', exact: true })).toBeDisabled();
-    await expect(manager.getByRole('button', { name: '로그인', exact: true })).toBeDisabled();
+    await expect(manager.getByRole('button', { name: '기기 계정으로 계속', exact: true })).toBeDisabled();
+    await expect(manager.getByRole('button', { name: '패스키로 로그인', exact: true })).toBeDisabled();
     expect(authRequests).toEqual([]);
     await page.evaluate(() => Reflect.get(window, '__releaseInitialRead')());
-    await expect(manager.getByRole('button', { name: '시작', exact: true })).toBeEnabled();
+    await expect(manager.getByRole('button', { name: '기기 계정으로 계속', exact: true })).toBeEnabled();
     if (outcome === 'failure') await expect(manager.getByRole('group', { name: '작업 실패' })).toBeVisible();
     expect(authRequests).toEqual([]);
   });
@@ -267,8 +267,8 @@ test('entry, empty library and rejected files use actions instead of visible gui
   });
   await page.goto('./');
   await expect(page.getByRole('heading', { name: '보관함', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: '로그인', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: '시작', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '패스키로 로그인', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '기기 계정으로 계속', exact: true })).toBeVisible();
   await expect(page.locator('p:visible, [title]')).toHaveCount(0);
   expect(authRequests).toEqual([]);
   await page.getByRole('button', { name: '기기 보관함', exact: true }).click();

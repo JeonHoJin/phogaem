@@ -43,7 +43,7 @@ async function openShared(page: Page, initial: PhotoProcessing, media: { name: s
   });
   await page.goto('./');
   await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
-  await page.getByRole('button', { name: '시작', exact: true }).click();
+  await page.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
   await page.getByRole('button', { name: '처리 검증 여행', exact: false }).click();
   await expect(page.locator('article.photo-card')).toHaveCount(1);
   return model;

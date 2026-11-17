@@ -50,7 +50,7 @@ async function openShared(page: Page, initialCount = 0) {
   });
   await page.goto('./');
   await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
-  await page.getByRole('button', { name: '시작', exact: true }).click();
+  await page.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
   await page.getByRole('button', { name: album.title, exact: false }).click();
   await expect(page.getByRole('heading', { name: album.title, exact: true })).toBeVisible();
   return model;

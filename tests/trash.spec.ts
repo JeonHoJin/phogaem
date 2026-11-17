@@ -86,7 +86,7 @@ async function openShared(page: Page, options: { owner?: boolean; grouped?: bool
   });
   await page.goto('./');
   await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
-  await page.getByRole('button', { name: '시작', exact: true }).click();
+  await page.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
   await page.getByRole('button', { name: album.title, exact: false }).click();
   await expect(items(page)).toHaveCount(options.grouped ? 3 : 4 - (options.trashed?.length ?? 0));
   return model;

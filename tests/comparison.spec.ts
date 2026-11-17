@@ -90,7 +90,7 @@ async function openShared(page: Page, count = 2) {
   });
   await page.goto('./');
   await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
-  await page.getByRole('button', { name: '시작', exact: true }).click();
+  await page.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
   await page.getByRole('button', { name: '비교 검증 여행', exact: false }).click();
   await expect.poll(() => model.similarCalls).toBe(1);
   await expect(page.locator('article.photo-card')).toHaveCount(count);
@@ -696,4 +696,58 @@ test('a separation completed after closing comparison updates the library withou
     await expect(compare).toHaveCount(0);
     expect(model.originals).toEqual([]);
   } finally { release(); }
+});
+
+for (const unavailable of ['server', 'network'] as const) {
+  test(`candidate ${unavailable} failure still downloads only an explicitly selected active original`, async ({ page }) => {
+    const model = await openShared(page, 3);
+    groupAll(model);
+    await page.getByRole('button', { name: '새로고침', exact: true }).click();
+    await expect(page.locator('article.photo-card')).toHaveCount(1);
+    await page.getByRole('button', { name: 'photo-1.png 선택', exact: true }).click();
+    await page.getByRole('button', { name: '선택 다운로드', exact: true }).click();
+    if (unavailable === 'server') model.similarStatus = 503;
+    else await page.route('**/op/phogaem-similar-get/v1*', route => route.abort('failed'));
+    const downloads = page.getByRole('dialog', { name: '선택 사진 다운로드', exact: true });
+    const event = page.waitForEvent('download');
+    await downloads.getByRole('button', { name: /^일괄 다운로드/ }).click();
+    const download = await event;
+    expect(download.suggestedFilename()).toBe('photo-1.png');
+    expect(await readFile((await download.path())!)).toEqual(originalBytes(photoId(0)));
+    await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
+    expect(model.originals).toEqual([photoId(0)]);
+    expect(model.mutations).toEqual([{ operation: 'phogaem-download-state', body: { albumId, photoIds: [photoId(0)], state: 'requested' } }]);
+  });
+}
+
+for (const status of [401, 403, 404]) {
+  test(`candidate authorization or missing-resource ${status} never falls back to an original`, async ({ page }) => {
+    const model = await openShared(page);
+    await page.getByRole('button', { name: 'photo-1.png 선택', exact: true }).click();
+    await page.getByRole('button', { name: '선택 다운로드', exact: true }).click();
+    model.similarStatus = status;
+    const downloads = page.getByRole('dialog', { name: '선택 사진 다운로드', exact: true });
+    await downloads.getByRole('button', { name: /^일괄 다운로드/ }).click();
+    if (status === 403) {
+      await expect(page.getByRole('region', { name: '계정 승인 대기', exact: true })).toBeVisible();
+      await expect(page.locator('article.photo-card')).toHaveCount(0);
+    } else await expect(downloads.getByRole('group', { name: '작업 실패', exact: true })).toBeVisible();
+    await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
+    expect(model.originals).toEqual([]);
+    expect(model.mutations).toEqual([]);
+  });
+}
+
+test('candidate outage cannot download a selected photo removed from the fresh active album', async ({ page }) => {
+  const model = await openShared(page);
+  await page.getByRole('button', { name: 'photo-1.png 선택', exact: true }).click();
+  await page.getByRole('button', { name: '선택 다운로드', exact: true }).click();
+  model.photos.splice(0, 1);
+  model.similarStatus = 503;
+  const downloads = page.getByRole('dialog', { name: '선택 사진 다운로드', exact: true });
+  await downloads.getByRole('button', { name: /^일괄 다운로드/ }).click();
+  await expect(downloads.getByRole('group', { name: '작업 실패', exact: true })).toBeVisible();
+  await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
+  expect(model.originals).toEqual([]);
+  expect(model.mutations).toEqual([]);
 });

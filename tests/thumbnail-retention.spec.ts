@@ -51,7 +51,7 @@ async function openShared(page: Page, count = 160, configure?: (model: {
   });
   await page.goto('./');
   await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
-  await page.getByRole('button', { name: '시작', exact: true }).click();
+  await page.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
   await page.getByRole('button', { name: '썸네일 검증 여행', exact: false }).click();
   await expect(cards(page)).toHaveCount(count);
   await expect(page.locator('.photo-grid')).toHaveAttribute('data-columns', '4');

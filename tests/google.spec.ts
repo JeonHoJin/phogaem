@@ -103,3 +103,20 @@ test('cancelled login restores invitation without resuming the previous account'
   expect(new URL(page.url()).hash).toBe('#invite=trip');
   expect(await page.evaluate(key => sessionStorage.getItem(key), pendingKey)).toBeNull();
 });
+
+test('mobile entry names each login method and makes no account until an explicit action', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const requests: string[] = [];
+  page.on('request', request => { if (new URL(request.url()).pathname.startsWith('/auth/')) requests.push(request.url()); });
+  await page.goto('./');
+  const google = page.getByRole('button', { name: 'Google로 로그인', exact: true });
+  await expect(google).toHaveText('Google로 로그인');
+  await expect(page.getByRole('button', { name: '패스키로 로그인', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '기기 계정으로 계속', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '시작', exact: true })).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const bounds = await google.boundingBox();
+  expect(bounds!.height).toBeGreaterThanOrEqual(44);
+  expect(requests).toEqual([]);
+  await page.screenshot({ path: '.local/login-methods-mobile.png' });
+});

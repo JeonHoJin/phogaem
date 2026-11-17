@@ -58,7 +58,7 @@ async function approveIdentity(page: Page): Promise<{ userId: string }> {
 }
 
 async function connectApprovedUi(page: Page) {
-  await page.getByRole('button', { name: '시작', exact: true }).click();
+  await page.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
   await expect(page.getByRole('region', { name: '계정 승인 대기', exact: true })).toBeVisible();
   const identity = await client<{ userId: string }>(page, 'identity');
   await setApproval(page, identity.userId);
@@ -377,7 +377,7 @@ test('approval gates all photo operations, invitations cannot bypass it, and rev
   }
 
   // The public app receives a typed approval denial and reveals only the caller's account code.
-  await page.getByRole('button', { name: '시작', exact: true }).click();
+  await page.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
   await expect(page.getByRole('region', { name: '계정 승인 대기', exact: true })).toBeVisible();
   await expect(page.getByText(pending.userId.replaceAll('-', '').slice(0, 8), { exact: true })).toBeVisible();
   await expect(page.getByLabel('보관함 이름', { exact: true })).toHaveCount(0);
@@ -463,8 +463,8 @@ test('an invitation survives explicit login and pending approval before joining 
     const guest = await guestContext.newPage();
     await guest.goto(`./#invite=${encodeURIComponent(invite.token)}`);
     const manager = guest.getByRole('dialog', { name: '공유보관함 관리' });
-    await expect(manager.getByRole('button', { name: '시작', exact: true })).toBeVisible();
-    await manager.getByRole('button', { name: '시작', exact: true }).click();
+    await expect(manager.getByRole('button', { name: '기기 계정으로 계속', exact: true })).toBeVisible();
+    await manager.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
     const pending = guest.getByRole('region', { name: '계정 승인 대기' });
     await expect(pending).toBeVisible();
     await expect(guest.locator('p:visible, [title]')).toHaveCount(0);
@@ -681,7 +681,7 @@ test('approved invitations open directly on reload and hash change, and replaced
     const album = await client<{ id: string }>(owner, 'create', { title: '바로 참여 여행' });
     const invitation = await client<{ token: string }>(owner, 'invite', { albumId: album.id });
     const guest = await guestContext.newPage(); await guest.goto('./'); await approveIdentity(guest);
-    await guest.getByRole('button', { name: '시작', exact: true }).click();
+    await guest.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
     await expect(guest.getByRole('region', { name: '여행 보관함 목록' })).toBeVisible();
     for (const entry of ['reload', 'hashchange']) {
       if (entry === 'reload') await guest.goto('about:blank');
@@ -733,7 +733,7 @@ test('shared videos keep independent items and original bytes without image proc
       expect(photo.importCount).toBe(1);
       expect(await client(page, 'blob', { albumId: album.id, photoId: photo.id })).toEqual(bytes);
     }
-    await page.getByRole('button', { name: '시작', exact: true }).click();
+    await page.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
     await page.getByRole('button', { name: '영상 원본 검증', exact: false }).click();
     await expect(page.locator('article.photo-card')).toHaveCount(2);
     await page.getByRole('button', { name: '중복', exact: true }).click();

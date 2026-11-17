@@ -328,7 +328,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   const stacks = useMemo(() => buildPhotoStacks(photos, candidates?.groups ?? []), [photos, candidates]);
   const filteredPhotos = useMemo(() => photos.filter(p => matchesFilters(p, filters, member, similarIds)), [photos, filters, member, similarIds]);
   const visible = useMemo(() => stacks.map(stack => stack.representative).filter(p => matchesFilters(p, filters, member, similarIds)), [stacks, filters, member, similarIds]);
-  const downloadReady = !inTrash && (!remote?.album || !!candidates && !candidatesLoading && !candidatesError);
+  const downloadReady = !inTrash;
   const normalizedDownloadIds = useMemo(() => downloadIds === null ? null : representativeDownloadIds(downloadIds, stacks), [downloadIds, stacks]);
   const stacksByPhoto = useMemo(() => new Map(stacks.map(stack => [stack.representative.id, stack])), [stacks]);
   const visibleIds = useMemo(() => visible.map(photo => photo.id), [visible]);
@@ -661,9 +661,23 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     const albumId = activeAlbumId; const epoch = sourceEpoch.current;
     const result = await sharedApi.getAlbum(albumId);
     if (epoch !== sourceEpoch.current || albumIdentity.current !== albumId) throw new Error('보관함 변경');
-    const fresh = await sharedApi.getSimilarPhotos(albumId);
+    const latest: Photo[] = result.photos.filter(photo => !isTrashed(photo)).map(photo => ({ ...photo, albumId }));
+    let fresh: SimilarPhotos;
+    try { fresh = await sharedApi.getSimilarPhotos(albumId); }
+    catch (reason) {
+      if (epoch !== sourceEpoch.current || albumIdentity.current !== albumId) throw new Error('보관함 변경', { cause: reason });
+      // Candidate availability must not prevent retrieval of explicitly selected originals.
+      // Authorization, missing resources and conflict responses still fail closed.
+      if (!(reason instanceof ServerError) || !(reason.status === 0 || reason.status >= 500 && reason.status < 600)) throw reason;
+      comparisonRequest.current += 1;
+      candidatesRevision.current = latest.map(photo => `${photo.id}:${photo.processing?.vision?.state ?? ''}`).sort().join('|');
+      setRemote(previous => previous?.album?.id === albumId ? { ...previous, album: result.album, members: result.members } : previous);
+      setPhotos(latest); setCandidates(null); setCandidatesLoading(false); setCandidatesError(reason.message);
+      const activeIds = new Set(latest.map(photo => photo.id));
+      setSelected(previous => new Set([...previous].filter(id => activeIds.has(id))));
+      return [...new Set(ids)].map(id => latest.find(photo => photo.id === id)).filter((photo): photo is Photo => !!photo);
+    }
     if (epoch !== sourceEpoch.current || albumIdentity.current !== albumId) throw new Error('보관함 변경');
-    const latest: Photo[] = result.photos.map(photo => ({ ...photo, albumId }));
     const knownIds = new Set(latest.map(photo => photo.id));
     if (fresh.groups.some(group => group.representativeId && !knownIds.has(group.representativeId))) throw new ServerError(409, '사진 목록 변경');
     const currentStacks = buildPhotoStacks(latest, fresh.groups);
@@ -715,12 +729,12 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   }, [clearComparison]);
   function googleButton(link = false) {
     if (!GOOGLE_LOGIN_ENABLED) return null;
-    return <button className="icon-button google-auth" aria-label={link ? 'Google 연결' : 'Google로 로그인'} disabled={busy || loading} onClick={() => {
+    return <button className="button google-auth" aria-label={link ? 'Google 연결' : 'Google로 로그인'} disabled={busy || loading} onClick={() => {
       void mutate(async () => {
         await beginGoogleAuth(link ? remote?.userId : undefined, inviteToken);
         return photos;
       });
-    }}><img src={googleSignInIcon} width="40" height="40" alt="" /></button>;
+    }}><img src={googleSignInIcon} width="40" height="40" alt="" /><span>{link ? 'Google 연결' : 'Google로 로그인'}</span></button>;
   }
   async function connectShared(passkey = false) {
     if (loading) return;
@@ -973,7 +987,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
       </div>{(localMode || remote?.album) && <button className="button primary" onClick={openFilePicker} disabled={busy || loading || inTrash || queuedFiles.length > 0}><Icon name="plus" />올리기</button>}</section>
       {!remote && !localMode ? <section className="entry-surface" aria-label="로그인">
         {loading ? <span className="loading-dot" aria-label="불러오는 중" /> : <Icon name={approvalCode !== null ? 'lock' : 'layers'} size={64} />}
-        <div className="entry-actions">{googleButton()}<button className="button primary" disabled={busy || loading || !passkeySupported()} onClick={() => void connectShared(true)}>로그인</button><button className="button secondary" disabled={busy || loading} onClick={() => void connectShared()}>시작</button></div>
+        <div className="entry-actions">{googleButton()}<button className="button secondary" disabled={busy || loading || !passkeySupported()} onClick={() => void connectShared(true)}>패스키로 로그인</button><button className="button secondary" disabled={busy || loading} onClick={() => void connectShared()}>기기 계정으로 계속</button></div>
         <button className="text-button" disabled={busy} onClick={() => void returnLocal()}>기기 보관함</button>{errorControl()}
       </section> : remote && !remote.album ? <section aria-label="여행 보관함 목록">
         <div className="list-actions"><button className="button primary" disabled={busy} onClick={() => openManager('create')}><Icon name="plus" />새 보관함</button><button className="button secondary" disabled={busy} onClick={() => openManager('join')}><Icon name="arrow" />초대 참여</button><button className="icon-button" aria-label="보관함 목록 새로고침" disabled={busy} onClick={() => void connectShared()}><Icon name="retry" /></button></div>
@@ -1022,7 +1036,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
       <div className="download-list">{(normalizedDownloadIds ?? []).map(id => photos.find(photo => photo.id === id)).filter((photo): photo is Photo => !!photo).map(photo => <div key={photo.id} className="download-item"><div className="download-thumb"><Preview photo={photo} /></div><div className="download-item-info"><strong>{photo.name}</strong><small>{formatBytes(photo.size)}</small><span role="img" aria-label={photo.receivedBy.includes(member) ? '받았음 확인' : photo.requestedBy.includes(member) ? '다운로드 요청됨' : '아직 요청하지 않음'}><Icon name={photo.receivedBy.includes(member) ? 'check' : photo.requestedBy.includes(member) ? 'download' : 'image'} size={16} /></span></div><button className="icon-button" aria-label={`${photo.name} 다운로드 선택 해제`} disabled={busy} onClick={() => setDownloadIds(current => current?.filter(id => representativeDownloadIds([id], stacks)[0] !== photo.id) ?? null)}><Icon name="close" /></button><div className="receipt-actions">{photo.requestedBy.includes(member) && <><button className="icon-button" disabled={busy} aria-label="받았음 확인" aria-pressed={photo.receivedBy.includes(member)} onClick={() => void mutate(() => downloadState([photo.id], photo.receivedBy.includes(member) ? 'reset' : 'received'))}><Icon name="check" /></button><button className="icon-button" disabled={busy} aria-label="기록 되돌리기" onClick={() => void mutate(() => downloadState([photo.id], 'reset'))}><Icon name="retry" /></button></>}</div><button className="icon-button outlined" disabled={busy || !downloadReady} aria-label={`${photo.name} 원본 다운로드`} onClick={() => void download(photo)}><Icon name="download" /></button></div>)}</div></Modal>}
     {managerOpen && <Modal label="공유보관함 관리" onClose={dismissManager} className="download-dialog shared-dialog"><header className="dialog-header"><div><h2>{incomingInvite ? '참여' : !remote ? '로그인' : { create: '새 보관함', join: '초대 참여', invite: '친구 초대', settings: '보관함 설정', account: '계정' }[managerView]}</h2>{!incomingInvite && remote?.album && ['invite', 'settings'].includes(managerView) && <strong className="dialog-context">{remote.album.title}</strong>}</div><button className="icon-button" disabled={busy} aria-label="공유보관함 관리 닫기" onClick={dismissManager}><Icon name="close" /></button></header>
       {!incomingInvite && errorControl()}{!remote ? <div className="connect-actions">{incomingInvite && errorControl()}{approvalCode !== null && <section className="approval-pending" aria-label="계정 승인 대기"><Icon name="lock" size={40} /><output aria-label="계정 코드">{approvalCode}</output><button className="icon-button" disabled={busy || loading} aria-label="새로고침" onClick={() => void connectShared()}><Icon name="retry" /></button></section>}
-        {googleButton()}<button className="button primary" disabled={busy || loading || !passkeySupported()} onClick={() => void connectShared(true)}>로그인</button><button className="button secondary" disabled={busy || loading} onClick={() => void connectShared()}>시작</button>
+        {googleButton()}<button className="button secondary" disabled={busy || loading || !passkeySupported()} onClick={() => void connectShared(true)}>패스키로 로그인</button><button className="button secondary" disabled={busy || loading} onClick={() => void connectShared()}>기기 계정으로 계속</button>
         {approvalCode !== null && <button className="button secondary" disabled={busy || !passkeySupported()} onClick={() => void mutate(async () => { await registerPasskey(); setPasskeyRegistered(true); return []; }, '패스키 등록 완료')}>{passkeyRegistered ? <Icon name="check" /> : <Icon name="lock" />}패스키 등록</button>}
         <button className="text-button" disabled={busy} onClick={() => void returnLocal()}>기기 보관함</button>
       </div> : incomingInvite ? <section aria-label="초대 참여" aria-busy={busy}>
