@@ -1,6 +1,7 @@
 // Adapted from schedule-parser/apps/mobile/src/server/index.ts.
 // Key-store access is lazy: constructing this module never opens IndexedDB or signs in.
 import { ServerClient, type KeyStore } from './client.ts';
+import { isAccountSignedOut } from './accountSession.ts';
 
 import { DEFAULT_API_BASE, validateApiBase } from './config.ts';
 export { validateApiBase } from './config.ts';
@@ -37,5 +38,5 @@ export const indexedDbKeyStore: KeyStore = {
   put: keys => keyRequest('readwrite', store => store.put(keys, 'default')).then(() => undefined),
 };
 
-export const server = new ServerClient({ base: API_BASE, store: indexedDbKeyStore });
+export const server = new ServerClient({ base: API_BASE, store: indexedDbKeyStore, isSignedOut: isAccountSignedOut });
 export { ServerError } from './client.ts';

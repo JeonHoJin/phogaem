@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import type { Page, Route } from '@playwright/test';
+import { createHash } from 'node:crypto';
 
 const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
 const albumId = '00000000-0000-4000-8000-000000000001';
@@ -9,7 +10,7 @@ const members = [{ id: userId, name: '나', color: '#c5d6c4' }];
 const file = (name: string) => ({ name, mimeType: 'image/png', buffer: pixel });
 const photo = (name: string, index: number) => ({
   id: `00000000-0000-4000-8001-${String(index).padStart(12, '0')}`, name,
-  type: 'image/png', size: pixel.length, hash: `synthetic-${index}`, createdAt: index,
+  type: 'image/png', size: pixel.length, hash: createHash('sha256').update(pixel).digest('hex'), createdAt: index,
   contributors: [userId], requestedBy: [], receivedBy: [], importCount: 1,
 });
 function gate() {
@@ -23,7 +24,8 @@ async function openShared(page: Page, initialCount = 0) {
     photos: Array.from({ length: initialCount }, (_, index) => photo(`existing-${index}.png`, index)),
     uploads: [] as string[],
     upload: async (route: Route, name: string) => {
-      const uploaded = photo(name, model.photos.length + 1);
+      const bytes = route.request().postDataBuffer() ?? pixel;
+      const uploaded = { ...photo(name, model.photos.length + 1), size: bytes.length, hash: createHash('sha256').update(bytes).digest('hex') };
       model.photos.push(uploaded);
       await route.fulfill({ json: { added: true, photo: uploaded } });
     },
@@ -45,7 +47,7 @@ async function openShared(page: Page, initialCount = 0) {
       const name = url.searchParams.get('name')!;
       model.uploads.push(name);
       await model.upload(route, name);
-    } else if (operation === 'phogaem-push-status') await route.fulfill({ json: { enabled: false, publicKey: '' } });
+    } else if (operation === 'phogaem-push-status') await route.fulfill({ json: { enabled: false, publicKey: null } });
     else throw new Error(`Unexpected synthetic operation: ${operation}`);
   });
   await page.goto('./');
@@ -331,4 +333,86 @@ test('changing the local preview user clears a failed pending batch and its old 
   await expect(page.locator('article.photo-card')).toHaveCount(0);
   await expect(page.getByRole('button', { name: '올리기', exact: true })).toBeEnabled();
   expect(authRequests).toEqual([]);
+});
+
+
+test('in-flight uploads allow album browsing and selection but keep mutations and source switches locked', async ({ page }) => {
+  const model = await openShared(page, 2);
+  const pending = gate();
+  const commit = model.upload;
+  model.upload = async (route, name) => { await pending.held; await commit(route, name); };
+  try {
+    await page.getByLabel('사진 파일 선택').setInputFiles(file('uploading.png'));
+    await expect.poll(() => model.uploads.length).toBe(1);
+    await page.getByRole('button', { name: '내 사진', exact: true }).click();
+    await expect(page.getByRole('button', { name: '내 사진', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await page.getByRole('button', { name: '전체', exact: true }).click();
+    await page.getByRole('button', { name: 'existing-0.png 선택', exact: true }).click();
+    await expect(page.getByRole('button', { name: 'existing-0.png 선택', exact: true })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('button', { name: '선택 다운로드', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: '휴지통으로 이동', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: '휴지통', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: '보관함 목록', exact: true })).toBeDisabled();
+    await expect(page.getByRole('button', { name: '계정', exact: true })).toBeDisabled();
+    const density = page.getByLabel('한 줄 사진 수', { exact: true });
+    const before = await density.innerText();
+    await page.getByRole('button', { name: '사진 확대', exact: true }).click();
+    await expect(density).not.toHaveText(before);
+    await page.getByRole('button', { name: 'existing-0.png 크게 보기', exact: true }).click();
+    const viewer = page.getByRole('dialog', { name: '사진 크게 보기', exact: true });
+    await expect(viewer).toBeVisible();
+    await expect(viewer.getByRole('button', { name: '이 사진 다운로드', exact: true })).toBeDisabled();
+    await expect(viewer.getByRole('button', { name: '이 사진 휴지통으로 이동', exact: true })).toBeDisabled();
+    await viewer.getByRole('button', { name: '뷰어 닫기', exact: true }).click();
+    pending.release();
+    await expect(page.getByRole('status', { name: '업로드 완료', exact: true })).toBeVisible();
+    await expect(page.locator('article.photo-card')).toHaveCount(3);
+  } finally { pending.release(); }
+});
+
+test('reload recovery skips acknowledged bytes only and uploads a changed file with the same name', async ({ page }) => {
+  const model = await openShared(page);
+  const pending = gate(); const commit = model.upload;
+  model.upload = async (route, name) => {
+    if (name === 'pending.png') { await pending.held; await route.fulfill({ status: 503, json: { error: 'synthetic interruption' } }); }
+    else await commit(route, name);
+  };
+  try {
+    await page.getByLabel('사진 파일 선택').setInputFiles([file('saved.png'), file('pending.png')]);
+    await expect(page.locator('article.photo-card')).toHaveCount(1);
+    await expect.poll(() => model.uploads.length).toBe(2);
+    pending.release();
+    await expect(page.getByRole('status', { name: '업로드 중단', exact: true })).toBeVisible();
+    await page.reload();
+    await page.getByRole('button', { name: album.title, exact: false }).click();
+    await expect(page.getByRole('heading', { name: album.title, exact: true })).toBeVisible();
+    const recovery = page.getByRole('region', { name: '중단된 업로드', exact: true });
+    await expect(recovery).toContainText('1/2');
+    model.upload = commit;
+    const chooserPromise = page.waitForEvent('filechooser');
+    await recovery.getByRole('button', { name: '다시 선택', exact: true }).click();
+    const chooser = await chooserPromise;
+    const modified = Buffer.concat([pixel, Buffer.from('changed')]);
+    await chooser.setFiles([file('saved.png'), { name: 'saved.png', mimeType: 'image/png', buffer: modified }, file('pending.png')]);
+    await expect(page.getByRole('status', { name: '업로드 완료', exact: true })).toContainText('3/3');
+    expect(model.uploads).toEqual(['saved.png', 'pending.png', 'saved.png', 'pending.png']);
+    expect(model.photos.map(value => value.hash)).toContain(createHash('sha256').update(modified).digest('hex'));
+    await expect(recovery).toHaveCount(0);
+    await page.reload();
+    await page.getByRole('button', { name: album.title, exact: false }).click();
+    await expect(page.getByRole('heading', { name: album.title, exact: true })).toBeVisible();
+    await expect(recovery).toHaveCount(0);
+  } finally { pending.release(); }
+});
+
+test('invalid files can be excluded as a batch while valid pending originals remain retryable', async ({ page }) => {
+  const model = await openShared(page);
+  await page.getByLabel('사진 파일 선택').setInputFiles([file('valid.png'), { name: 'bad.txt', mimeType: 'text/plain', buffer: Buffer.from('bad') }, { name: 'bad.html', mimeType: 'text/html', buffer: Buffer.from('bad') }]);
+  const queue = page.getByRole('region', { name: '업로드 파일', exact: true });
+  await expect(queue.getByRole('button', { name: '다시 올리기', exact: true })).toBeDisabled();
+  await queue.getByRole('button', { name: /^제외/ }).click();
+  await expect(queue.getByRole('button', { name: '계속', exact: true })).toBeEnabled();
+  await queue.getByRole('button', { name: '계속', exact: true }).click();
+  await expect(page.getByRole('status', { name: '업로드 완료', exact: true })).toContainText('1/1');
+  expect(model.uploads).toEqual(['valid.png']);
 });

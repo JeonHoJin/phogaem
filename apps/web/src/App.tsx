@@ -1,5 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
+import { createUploadRecovery, addRecoveryCompletion, loadUploadRecovery, saveUploadRecovery, clearUploadRecovery, createRecoveryMatcher } from './uploadRecovery';
+import type { UploadRecovery } from './uploadRecovery';
 import { ThumbnailCache } from './thumbnailCache';
 import { PhotoGrid } from './PhotoGrid';
 import { AlbumNotifications } from './AlbumNotifications';
@@ -14,6 +16,7 @@ import { inviteShareUrl, inviteTokenFromInput } from './server/invite';
 import googleSignInIcon from './assets/google-sign-in.svg';
 import type { ChangeEvent, DragEvent, ReactNode } from 'react';
 import { server, ServerError } from './server/index';
+import { ACCOUNT_SIGNED_OUT_KEY, isAccountSignedOut, logoutAccount, resumeAccount } from './server/accountSession';
 import { createPhotoArchive, validateArchiveSize, splitArchiveItems, MAX_ARCHIVE_BYTES } from './archive';
 import { isTrashed, isVideo, MEMBERS, defaultAlbumName, mergeUploadedPhoto, filterPhotos, formatBytes, matchesFilters, buildPhotoStacks, representativeDownloadIds } from './domain';
 import type { MemberId, Photo, PhotoFilter, ProcessingKind, ProcessingJob } from './domain';
@@ -256,9 +259,13 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   const [queuePage, setQueuePage] = useState(0);
   const [stopRequested, setStopRequested] = useState(false);
   const uploadStop = useRef(false);
+  const [recoveryAvailable, setRecoveryAvailable] = useState<UploadRecovery | null>(null);
+  const recoveringSelection = useRef(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [rejectedFiles, setRejectedFiles] = useState<Set<File>>(new Set());
+  const [uploadFailure, setUploadFailure] = useState<'connection' | 'capacity' | 'file' | null>(null);
   const [nickname, setNickname] = useState('');
+  const [memberRemoval, setMemberRemoval] = useState<{ id: string; name: string } | null>(null);
   const [ownerNickname, setOwnerNickname] = useState('');
   const [passkeyRegistered, setPasskeyRegistered] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -284,6 +291,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const browsingBusy = busy && uploadPhase === null;
   const [error, setError] = useState(initialAuthError);
   const [notice, setNotice] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -314,7 +322,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   const fileInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
     const input = fileInput.current;
-    const cancelled = () => { if (input === fileInput.current) setPickerPending(false); };
+    const cancelled = () => { if (input === fileInput.current) { setPickerPending(false); recoveringSelection.current = false; } };
     input?.addEventListener('cancel', cancelled);
     return () => input?.removeEventListener('cancel', cancelled);
   }, [pickerGeneration]);
@@ -378,7 +386,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     const epoch = sourceEpoch.current;
     void (async () => {
       try {
-        if (initialAuthError || localStorage.getItem(RESUME_KEY) !== '1' || !await server.hasIdentity()) return;
+        if (isAccountSignedOut() || initialAuthError || localStorage.getItem(RESUME_KEY) !== '1' || !await server.hasIdentity()) return;
         const result = await sharedApi.listAlbums();
         if (active && epoch === sourceEpoch.current) { sourceEpoch.current += 1; setPhotos([]); setRemote({ ...result, album: null, members: [] }); }
       } catch (reason) {
@@ -402,6 +410,10 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   }, [clearComparison]);
 
   const activeAlbumId = remote?.album?.id;
+  useEffect(() => {
+    recoveringSelection.current = false;
+    setRecoveryAvailable(remote?.userId && activeAlbumId ? loadUploadRecovery({ userId: remote.userId, albumId: activeAlbumId }) : null);
+  }, [remote?.userId, activeAlbumId]);
   const albumIdentity = useRef(activeAlbumId);
   albumIdentity.current = activeAlbumId;
   useEffect(() => {
@@ -484,10 +496,10 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     if (!source.length || inTrash || operation.current || busy || loading || !resume && queuedFiles.length > 0) return;
     const uploadEpoch = sourceEpoch.current;
     const previous = resume ? uploadSummary : null;
-    const baseDone = previous?.done ?? 0;
-    const baseBytes = previous?.bytes ?? 0;
+    let baseDone = previous?.done ?? 0;
+    let baseBytes = previous?.bytes ?? 0;
     const total = baseDone + source.length;
-    uploadStop.current = false; setStopRequested(false); setQueuePage(0);
+    uploadStop.current = false; setStopRequested(false); setQueuePage(0); setUploadFailure(null);
     if (!resume) { setRejectedFiles(new Set()); setQueueOpen(false); }
     // Commit feedback before reading file entries or validating a large batch.
     flushSync(() => {
@@ -510,12 +522,45 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     });
     try { await mutate(async () => {
       await afterPaint();
-      const files: File[] = [];
+      let files: File[] = [];
+      let startingPhotos = photos;
       for (const file of source) {
         files.push(file);
         if (files.length % 32 === 0) await afterPaint();
       }
       if (uploadEpoch !== sourceEpoch.current) return [];
+      const recoveryScope = remote?.album ? { userId: remote.userId, albumId: remote.album.id } : null;
+      let manifest = recoveryScope && (resume || recoveringSelection.current) ? loadUploadRecovery(recoveryScope) : null;
+      if (recoveringSelection.current && recoveryScope && manifest) {
+        const latest = await sharedApi.getAlbum(recoveryScope.albumId);
+        if (uploadEpoch !== sourceEpoch.current) return [];
+        const active = latest.photos.filter(photo => !isTrashed(photo) && photo.contributors.includes(recoveryScope.userId));
+        manifest = { ...manifest, completed: manifest.completed.filter(entry => active.some(photo => photo.hash === entry.hash && photo.size === entry.size && photo.type === entry.type)).map(entry => ({ ...entry, count: isVideo(entry) ? Math.min(entry.count, active.filter(photo => photo.hash === entry.hash && photo.size === entry.size && photo.type === entry.type).length) : entry.count })) };
+        const matcher = createRecoveryMatcher(manifest);
+        const remaining: File[] = [];
+        for (const file of files) {
+          if (uploadEpoch !== sourceEpoch.current) return [];
+          if (await matcher.consume(file)) { baseDone += 1; baseBytes += file.size; }
+          else remaining.push(file);
+          setProgress({ done: baseDone, total });
+          await afterPaint();
+        }
+        files = remaining;
+        startingPhotos = latest.photos.map(photo => ({ ...photo, albumId: recoveryScope.albumId }));
+        setPhotos(startingPhotos);
+      }
+      recoveringSelection.current = false;
+      if (recoveryScope) {
+        try {
+          manifest = manifest ? { ...manifest, plannedCount: Math.max(manifest.plannedCount, manifest.completed.reduce((sum, entry) => sum + entry.count, 0) + files.length) } : createUploadRecovery(files.length || 1);
+          saveUploadRecovery(recoveryScope, manifest);
+        } catch { manifest = null; }
+      }
+      if (!files.length) {
+        if (recoveryScope) clearUploadRecovery(recoveryScope);
+        setRecoveryAvailable(null); setUploadSummary({ done: baseDone, total: baseDone, bytes: baseBytes, totalBytes: baseBytes });
+        return recoveryScope ? await refreshAlbum(recoveryScope.albumId) : photos;
+      }
       setQueuedFiles(files);
       setRejectedFiles(new Set(files.filter(file => {
         try { if (remote) sharedApi.validateSharedFiles([file]); else validateLocalFile(file); return false; }
@@ -529,11 +574,15 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
       if (remote) {
         if (!remote.album) throw new Error('먼저 공유보관함을 만들거나 선택해 주세요.');
         const completedIndices = new Set<number>();
-        let committedPhotos = photos;
+        let committedPhotos = startingPhotos;
         try {
           const result = await sharedApi.uploadSharedPhotos(remote.album.id, files, (done, event) => {
             if (uploadEpoch !== sourceEpoch.current) return;
             event.completedIndices.forEach(index => completedIndices.add(index));
+            if (manifest && recoveryScope) {
+              try { manifest = addRecoveryCompletion(manifest, event.photo); saveUploadRecovery(recoveryScope, manifest); }
+              catch { /* optional recovery cannot fail an acknowledged upload */ }
+            }
             setProgress({ done: baseDone + done, total });
             const bytes = baseBytes + [...completedIndices].reduce((sum, index) => sum + files[index]!.size, 0);
             setUploadSummary({ done: baseDone + done, total, bytes, totalBytes });
@@ -545,6 +594,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
           setNotice(`${result.added}장 추가 · 중복 ${result.duplicates}장`);
         } catch (reason) {
           if (reason instanceof ApprovalRequired) throw reason;
+          setUploadFailure(reason instanceof ServerError && reason.status === 507 ? 'capacity' : reason instanceof ServerError && (reason.status === 0 || reason.status >= 500) ? 'connection' : 'file');
           if (reason instanceof ServerError && [400, 413, 415, 507].includes(reason.status) && sharedApi.getUploadFailureIndex(reason) !== undefined) {
             const rejected = files[sharedApi.getUploadFailureIndex(reason)!];
             if (rejected) setRejectedFiles(previous => new Set([...previous, rejected]));
@@ -553,7 +603,8 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
           try { const partial = await refreshAlbum(remote.album.id); if (uploadEpoch === sourceEpoch.current) setPhotos(partial); } catch (refreshError) { if (refreshError instanceof ApprovalRequired) throw refreshError; }
           throw reason;
         }
-        setQueuedFiles([]); setUploadPhase('finishing');
+        if (recoveryScope) clearUploadRecovery(recoveryScope);
+        setRecoveryAvailable(null); setQueuedFiles([]); setUploadPhase('finishing');
         retryAction.current = () => refreshAlbum(remote.album!.id);
         return await refreshAlbum(remote.album.id);
       }
@@ -583,9 +634,17 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     setRejectedFiles(current => { const next = new Set(current); next.delete(file); return next; });
     setUploadSummary(current => current && current.total > 1 ? { ...current, total: current.total - 1, totalBytes: current.totalBytes - file.size } : null);
   }
+  function removeRejectedFiles() {
+    if (busy) return;
+    const remaining = queuedFiles.filter(file => !rejectedFiles.has(file));
+    const removed = queuedFiles.filter(file => rejectedFiles.has(file));
+    setQueuedFiles(remaining); setRejectedFiles(new Set()); setError(''); setUploadFailure(null);
+    setUploadSummary(current => current && current.total > removed.length ? { ...current, total: current.total - removed.length, totalBytes: current.totalBytes - removed.reduce((sum, file) => sum + file.size, 0) } : null);
+  }
   function clearUploadQueue() {
     if (busy) return;
-    setQueuedFiles([]); setRejectedFiles(new Set()); setUploadSummary(null); setQueueOpen(false); setQueuePage(0); setError('');
+    if (remote?.album) clearUploadRecovery({ userId: remote.userId, albumId: remote.album.id });
+    setRecoveryAvailable(null); setQueuedFiles([]); setRejectedFiles(new Set()); setUploadSummary(null); setQueueOpen(false); setQueuePage(0); setError('');
   }
   function openFilePicker() {
     if (!fileInput.current || inTrash || operation.current || busy || loading || pickerPending || queuedFiles.length > 0) return;
@@ -609,7 +668,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   }
   function drop(event: DragEvent) { event.preventDefault(); setDragging(false); void upload(Array.from(event.dataTransfer.files)); }
   function toggleFilter(filter: PhotoFilter) {
-    if (operation.current || busy || loading) return;
+    if (loading || browsingBusy || busy && (filter === 'trash' || inTrash)) return;
     if (filter === 'trash') { void changeTrashView(!inTrash, inTrash ? ['all'] : ['trash']); return; }
     if (inTrash) { void changeTrashView(false, [filter]); return; }
     if (filter === 'all') { setFilters(['all']); return; }
@@ -693,11 +752,12 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   }
   async function download(photo: Photo) {
     if (!downloadReady) return;
-    const requestedId = photo.id;
+    const requestedId = photo.id; const epoch = sourceEpoch.current;
     await mutate(async () => {
       const target = (await resolveDownloadPhotos([requestedId]))[0];
       if (!target) throw new Error('다운로드할 사진 없음');
       const blob = await originalBlob(target);
+      if (epoch !== sourceEpoch.current || isAccountSignedOut() && !!target.albumId) throw new Error('보관함 변경');
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
       anchor.href = url; anchor.download = target.name;
@@ -712,8 +772,10 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     return refreshAlbum(remote.album.id);
   }
   async function refreshAlbum(id: string, trashed = inTrash): Promise<Photo[]> {
+    const epoch = sourceEpoch.current;
     clearComparison();
     const result = await sharedApi.getAlbum(id, trashed);
+    if (epoch !== sourceEpoch.current || isAccountSignedOut()) throw new Error('보관함 변경');
     if (remote?.album?.id !== id) setPhotos([]);
     setRemote(previous => previous ? { ...previous, album: result.album, members: result.members } : previous);
     return result.photos.map(photo => ({ ...photo, albumId: id }));
@@ -726,14 +788,40 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     });
   }
   const clearTransient = useCallback((keepUploads = false) => {
-    clearComparison(); thumbnailCache.clear(); setPickerPending(false); setProcessingPhotoId(null);
+    clearComparison(); thumbnailCache.clear(); setMemberRemoval(null); recoveringSelection.current = false; setPickerPending(false); setProcessingPhotoId(null);
     setSelectionMode(false); setSelected(new Set()); setViewerId(null); setDownloadIds(null); setInviteLink(''); setNotice(''); setCopied(false);
     if (!keepUploads) { setQueuedFiles([]); setRejectedFiles(new Set()); setProgress(null); setUploadSummary(null); setQueueOpen(false); setQueuePage(0); uploadStop.current = true; }
   }, [clearComparison]);
+  const clearAccountScreen = useCallback(() => {
+    sourceEpoch.current += 1; retryAction.current = null; uploadStop.current = true;
+    clearTransient(); originalReads.clear(); setRemote(null); setPhotos([]); setApprovalCode(null);
+    setLocalMode(false); setManagerOpen(false); setError(''); setUploadPhase(null);
+    setIncomingInvite(false); setInviteToken(''); autoJoinAttempted.current = true;
+    try { localStorage.removeItem(RESUME_KEY); } catch { /* optional resume */ }
+    history.replaceState(null, '', location.pathname + location.search);
+  }, [clearTransient]);
+  function signOut() {
+    try { logoutAccount(); } catch { /* current tab is still suspended */ }
+    finally { clearAccountScreen(); }
+  }
+  useEffect(() => {
+    const changed = (event: StorageEvent) => {
+      if (event.key === ACCOUNT_SIGNED_OUT_KEY && event.newValue === 'true') {
+        server.suspendSession(); clearAccountScreen();
+      }
+    };
+    window.addEventListener('storage', changed);
+    return () => window.removeEventListener('storage', changed);
+  }, [clearAccountScreen]);
+  async function switchGoogleAccount() {
+    signOut();
+    await mutate(async () => { resumeAccount(); await beginGoogleAuth(); return []; });
+  }
   function googleButton(link = false) {
     if (!GOOGLE_LOGIN_ENABLED) return null;
     return <button className="button google-auth" aria-label={link ? 'Google 연결' : 'Google로 로그인'} disabled={busy || loading} onClick={() => {
       void mutate(async () => {
+        resumeAccount();
         await beginGoogleAuth(link ? remote?.userId : undefined, inviteToken);
         return photos;
       });
@@ -742,8 +830,11 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   async function connectShared(passkey = false) {
     if (loading) return;
     await mutate(async () => {
+      const epoch = sourceEpoch.current;
+      resumeAccount();
       if (passkey) await signInWithPasskey();
       const result = await sharedApi.listAlbums();
+      if (epoch !== sourceEpoch.current || isAccountSignedOut()) return [];
       setApprovalCode(null);
       setRemote({ ...result, album: null, members: [] });
       clearTransient();
@@ -777,6 +868,24 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
       return result;
     }, undefined, false, true);
   }, [pendingNotificationAlbum, remote?.userId, busy, loading, incomingInvite]);
+  async function removeMember() {
+    if (!remote?.album || !memberRemoval) return;
+    const albumId = remote.album.id; const target = memberRemoval.id; const ownId = remote.userId;
+    const epoch = sourceEpoch.current;
+    await mutate(async () => {
+      await sharedApi.removeAlbumMember(albumId, target);
+      if (epoch !== sourceEpoch.current) return [];
+      setMemberRemoval(null); setInviteLink(''); setInviteExpires(0);
+      if (target === ownId) {
+        clearTransient(); setPhotos([]); setRemote(previous => previous ? { ...previous, album: null, members: [], albums: previous.albums.filter(album => album.id !== albumId) } : null); setManagerOpen(false);
+        const result = await sharedApi.listAlbums();
+        if (epoch !== sourceEpoch.current) return [];
+        setRemote({ ...result, album: null, members: [] }); setManagerOpen(false); return [];
+      }
+      setRemote(previous => previous ? { ...previous, members: previous.members.filter(member => member.id !== target) } : null);
+      return refreshAlbum(albumId);
+    });
+  }
   function openManager(view: ManagerView) {
     const today = defaultAlbumName();
     const previousSuggestion = suggestedTitle.current;
@@ -946,7 +1055,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   }
   async function downloadBatch(partIds?: string[], partNumber?: number) {
     if (!downloadReady) return;
-    const ids = [...(partIds ?? downloadIds ?? [])];
+    const ids = [...(partIds ?? downloadIds ?? [])]; const epoch = sourceEpoch.current;
     if (!ids.length) return;
     await mutate(async () => {
       const batch = await resolveDownloadPhotos(ids);
@@ -957,9 +1066,11 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
         const entries: { name: string; blob: Blob }[] = [];
         for (const photo of batch) {
           entries.push({ name: photo.name, blob: await originalBlob(photo) });
+          if (epoch !== sourceEpoch.current || isAccountSignedOut() && !!photo.albumId) throw new Error('보관함 변경');
           setProgress({ done: entries.length, total: batch.length });
         }
         const blob = batch.length === 1 ? entries[0]!.blob : await createPhotoArchive(entries);
+        if (epoch !== sourceEpoch.current || isAccountSignedOut() && !!activeAlbumId) throw new Error('보관함 변경');
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement('a'); anchor.href = url;
         anchor.download = batch.length === 1 ? batch[0]!.name : partNumber ? `phogaem-${String(partNumber).padStart(2, '0')}.zip` : 'phogaem.zip';
@@ -1002,26 +1113,27 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
           <div className="album-actions" role="group" aria-label="보관함 작업">{(!remote.album?.ownerId || remote.album.ownerId === remote.userId) && <button className="button secondary invite-button" disabled={busy} onClick={() => void invite()}><Icon name="invite" />친구 초대</button>}<button className="button secondary" disabled={busy} onClick={() => openManager('settings')}><Icon name="settings" />보관함 설정</button></div>
         </> : <><select aria-label="미리보기 사용자" value={localMember} disabled={busy} onChange={event => { sourceEpoch.current += 1; retryAction.current = null; setError(''); clearTransient(); setLocalMember(event.target.value); }}>{MEMBERS.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}</select><button className="text-button" disabled={busy || inTrash || photos.length > 0} onClick={() => void mutate(seedDemo)}>샘플</button></>}</div>
         {!managerOpen && !downloadIds && errorControl()}
+        {recoveryAvailable && !queuedFiles.length && !uploadPhase && <section className="upload-recovery" aria-label="중단된 업로드"><Icon name="retry" /><output>{recoveryAvailable.completed.reduce((sum, entry) => sum + entry.count, 0)}/{recoveryAvailable.plannedCount}</output><button className="button secondary" disabled={busy || loading} onClick={() => { recoveringSelection.current = true; openFilePicker(); }}>다시 선택</button><button className="icon-button" aria-label="업로드 복구 기록 지우기" disabled={busy} onClick={clearUploadQueue}><Icon name="close" /></button></section>}
         {queuedFiles.length > 0 && <section className="upload-queue" aria-label="업로드 파일">
-          <div className="queue-toolbar"><button className="text-button" aria-expanded={queueOpen} aria-controls="upload-files" onClick={() => setQueueOpen(value => !value)}><Icon name={error ? 'alert' : 'layers'} />대기열 <output>{queuedFiles.length}</output></button>
-            {!busy && <div className="queue-actions"><button className="icon-button" aria-label="대기열 비우기" onClick={clearUploadQueue}><Icon name="close" /></button><button className="button secondary" disabled={!queuedValid} onClick={() => void upload(queuedFiles, true)}><Icon name={error ? 'retry' : 'play'} />{error ? '다시 올리기' : '계속'}</button></div>}
+          <div className="queue-toolbar">{uploadFailure && <span role="img" aria-label={uploadFailure === 'connection' ? '연결 실패' : uploadFailure === 'capacity' ? '보관함 용량 초과' : '파일 확인 필요'}><Icon name={uploadFailure === 'connection' ? 'retry' : uploadFailure === 'capacity' ? 'layers' : 'alert'} /></span>}<button className="text-button" aria-label="대기열" aria-expanded={queueOpen} aria-controls="upload-files" onClick={() => setQueueOpen(value => !value)}><Icon name={error ? 'alert' : 'layers'} />대기열 <output>{queuedFiles.length}</output>{rejectedFiles.size > 0 && <span role="img" aria-label="제외할 파일"><Icon name="alert" />{rejectedFiles.size}</span>}</button>
+            {!busy && <div className="queue-actions">{rejectedFiles.size > 0 && <button className="button secondary" onClick={removeRejectedFiles}><Icon name="minus" />제외 <span>{rejectedFiles.size}</span></button>}<button className="icon-button" aria-label="대기열 비우기" onClick={clearUploadQueue}><Icon name="close" /></button><button className="button secondary" disabled={!queuedValid} onClick={() => void upload(queuedFiles, true)}><Icon name={error ? 'retry' : 'play'} />{error ? '다시 올리기' : '계속'}</button></div>}
           </div>
-          {queueOpen && <div id="upload-files"><div className="queue-files">{queuedFiles.slice(visibleQueuePage * 32, (visibleQueuePage + 1) * 32).map((file, index) => <div className="queue-item" key={`${visibleQueuePage}:${index}:${file.name}`} data-rejected={rejectedFiles.has(file) || undefined}><Icon name={rejectedFiles.has(file) ? 'alert' : 'image'} /><span>{file.name}</span><span>{formatBytes(file.size)}</span>{!busy && <button className="icon-button" aria-label={`${file.name} 대기열에서 제거`} onClick={() => removeQueuedFile(visibleQueuePage * 32 + index)}><Icon name="close" /></button>}</div>)}</div>
+          {queueOpen && <div id="upload-files"><div className="queue-files">{queuedFiles.slice(visibleQueuePage * 32, (visibleQueuePage + 1) * 32).map((file, index) => <div className="queue-item" key={`${visibleQueuePage}:${index}:${file.name}`} data-rejected={rejectedFiles.has(file) || undefined}><Icon name={rejectedFiles.has(file) ? 'alert' : 'image'} /><span>{file.name}</span><span>{formatBytes(file.size)}{rejectedFiles.has(file) && remote && file.size > (isVideo(file) ? sharedApi.SHARED_MAX_VIDEO_SIZE : sharedApi.SHARED_MAX_FILE_SIZE) && <> / {formatBytes(isVideo(file) ? sharedApi.SHARED_MAX_VIDEO_SIZE : sharedApi.SHARED_MAX_FILE_SIZE)}</>}</span>{!busy && <button className="icon-button" aria-label={`${file.name} 대기열에서 제거`} onClick={() => removeQueuedFile(visibleQueuePage * 32 + index)}><Icon name="close" /></button>}</div>)}</div>
             {queuePages > 1 && <nav className="queue-pagination" aria-label="대기열 페이지"><button className="icon-button" aria-label="이전 파일" disabled={visibleQueuePage === 0} onClick={() => setQueuePage(visibleQueuePage - 1)}><Icon name="left" /></button><output>{visibleQueuePage + 1}/{queuePages}</output><button className="icon-button" aria-label="다음 파일" disabled={visibleQueuePage + 1 >= queuePages} onClick={() => setQueuePage(visibleQueuePage + 1)}><Icon name="right" /></button></nav>}
           </div>}
         </section>}
         <section className="library" aria-label="사진 보관함"><div className="library-top"><span>{photos.length}</span><div className="library-tools">{remote?.album && <div className="photo-tools" role="group" aria-label="사진 도구"><button className="text-button" aria-pressed={comparisonMode} disabled={busy || inTrash} onClick={() => { if (comparisonMode) clearComparison(); else void loadCandidates(); }}><Icon name="sparkles" size={17} />비교</button><button className="icon-button" aria-label="새로고침" disabled={busy} onClick={() => void selectAlbum(remote.album!.id)}><Icon name="retry" /></button>{PUSH_ENABLED && <AlbumNotifications key={`${remote.userId}:${remote.album.id}`} albumId={remote.album.id} userId={remote.userId} active={!busy && !loading} onError={reason => { if (reason instanceof ApprovalRequired) approvalDenied(reason); else setError(reason instanceof Error ? reason.message : '알림 설정 실패'); }} />}</div>}<button className="text-button" disabled={!pendingPhotos.length || busy} onClick={() => setDownloadIds(pendingPhotos.map(p => p.id))}><Icon name="download" size={16} />다운로드 기록 {pendingPhotos.length > 0 && <span>{pendingPhotos.length}</span>}</button></div></div>
-          <div className="filter-row"><div className="filter-chips" aria-label="사진 필터">{FILTERS.map(filter => <button key={filter.id} className={`filter-chip ${filters.includes(filter.id) ? 'active' : ''}`} aria-label={filter.label} aria-pressed={filters.includes(filter.id)} disabled={busy || loading} onClick={() => toggleFilter(filter.id)}>{({ all: '전체', others: '내 사진 제외', mine: '내 사진', unreceived: '받은 사진 제외', duplicates: '중복', trash: '휴지통' })[filter.id]}{filter.id === 'duplicates' && duplicateCount > 0 && <span>{duplicateCount}</span>}</button>)}</div></div>
-          <div className="selection-row"><label className="select-all"><input type="checkbox" aria-label="현재 사진 전체 선택" checked={visible.length > 0 && visible.every(p => selected.has(p.id))} disabled={!visible.length || busy} onChange={event => setSelected(event.target.checked ? new Set(visible.map(p => p.id)) : new Set())} />전체 선택</label><div className="selection-tools"><span>{visible.length}</span><button className="text-button" aria-label="사진 선택" aria-pressed={selectionMode} disabled={busy || !visible.length} onClick={() => setSelectionMode(value => !value)}>{selectionMode ? '완료' : '선택'}</button><div className="grid-zoom"><button className="icon-button" aria-label="사진 확대" disabled={busy || columns <= 2} onClick={() => setColumns(value => Math.max(2, value - 1))}><Icon name="plus" size={16} /></button><output aria-label="한 줄 사진 수">{columns}</output><button className="icon-button" aria-label="사진 축소" disabled={busy || columns >= maxColumns} onClick={() => setColumns(value => Math.min(maxColumns, value + 1))}><Icon name="minus" size={16} /></button></div></div></div>
+          <div className="filter-row"><div className="filter-chips" aria-label="사진 필터">{FILTERS.map(filter => <button key={filter.id} className={`filter-chip ${filters.includes(filter.id) ? 'active' : ''}`} aria-label={filter.label} aria-pressed={filters.includes(filter.id)} disabled={loading || browsingBusy || busy && (filter.id === 'trash' || inTrash)} onClick={() => toggleFilter(filter.id)}>{({ all: '전체', others: '내 사진 제외', mine: '내 사진', unreceived: '받은 사진 제외', duplicates: '중복', trash: '휴지통' })[filter.id]}{filter.id === 'duplicates' && duplicateCount > 0 && <span>{duplicateCount}</span>}</button>)}</div></div>
+          <div className="selection-row"><label className="select-all"><input type="checkbox" aria-label="현재 사진 전체 선택" checked={visible.length > 0 && visible.every(p => selected.has(p.id))} disabled={!visible.length || browsingBusy} onChange={event => setSelected(event.target.checked ? new Set(visible.map(p => p.id)) : new Set())} />전체 선택</label><div className="selection-tools"><span>{visible.length}</span><button className="text-button" aria-label="사진 선택" aria-pressed={selectionMode} disabled={browsingBusy || !visible.length} onClick={() => setSelectionMode(value => !value)}>{selectionMode ? '완료' : '선택'}</button><div className="grid-zoom"><button className="icon-button" aria-label="사진 확대" disabled={browsingBusy || columns <= 2} onClick={() => setColumns(value => Math.max(2, value - 1))}><Icon name="plus" size={16} /></button><output aria-label="한 줄 사진 수">{columns}</output><button className="icon-button" aria-label="사진 축소" disabled={browsingBusy || columns >= maxColumns} onClick={() => setColumns(value => Math.min(maxColumns, value + 1))}><Icon name="minus" size={16} /></button></div></div></div>
           {!comparisonMode && remote?.album && (candidatesLoading ? <div role="status" aria-label="중복 후보 불러오는 중"><span className="loading-dot" /></div> : candidatesError ? <div className="failure-controls" role="group" aria-label="중복 후보 불러오기 실패"><Icon name="alert" /><span className="visually-hidden" role="alert">{candidatesError}</span><button className="icon-button" aria-label="재시도" disabled={busy} onClick={() => void loadCandidates(false)}><Icon name="retry" /></button></div> : null)}
           {comparisonMode && remote?.album ? <section className="similar-board" aria-label="비교 후보" aria-busy={candidatesLoading}>
             <header className="similar-board-header"><h2>비교</h2><div className="candidate-counts"><output aria-label="비교 후보 수">{candidates ? candidateGroups.length : '—'}</output>{candidates && <><span role="img" aria-label={`분석 완료 ${candidates.analyzed}`}><Icon name="check" size={16} />{candidates.analyzed}</span>{candidates.pending > 0 && <span role="img" aria-label={`분석 대기 ${candidates.pending}`}><Icon name="clock" size={16} />{candidates.pending}</span>}{candidates.failed > 0 && <span role="img" aria-label={`분석 실패 ${candidates.failed}`}><Icon name="alert" size={16} />{candidates.failed}</span>}</>}<button className="icon-button" aria-label="후보 새로고침" disabled={busy || candidatesLoading} onClick={() => void loadCandidates()}><Icon name="retry" /></button></div></header>
             {candidatesLoading ? <div className="empty-state" role="status" aria-label="비교 후보 불러오는 중"><span className="loading-dot" /></div> : candidatesError ? <div className="failure-controls" role="group" aria-label="비교 후보 불러오기 실패"><Icon name="alert" /><span className="visually-hidden" role="alert">{candidatesError}</span><button className="icon-button" aria-label="재시도" disabled={busy} onClick={() => void loadCandidates()}><Icon name="retry" /></button></div> : candidateGroups.length > 0 ? <div className="candidate-grid">{candidateGroups.map((group, index) => <button className="candidate-group" key={group.id} aria-label={`비교 후보 ${index + 1} 열기`} onClick={() => { setComparisonPage(0); setComparisonGroupId(group.id); }}><div className="candidate-previews">{group.photos.slice(0, 4).map(photo => <div key={photo.id}><Preview photo={photo} thumbnailOnly /></div>)}</div><span><Icon name="layers" size={16} /><output>{group.photos.length}</output></span></button>)}</div> : <div className="empty-state"><Icon name="layers" size={48} />{candidates && <output>0</output>}{candidates && candidates.groups.length > 0 && <button className="button secondary" onClick={() => toggleFilter('all')}>필터 초기화</button>}</div>}
-          </section> : loading ? <div className="empty-state" aria-label="보관함 불러오는 중"><span className="loading-dot" /></div> : photos.length === 0 ? <div className="empty-state"><Icon name={inTrash ? "trash" : "image"} size={56} />{!inTrash && <button className="button primary" aria-label="첫 사진 올리기" disabled={busy || queuedFiles.length > 0} onClick={openFilePicker}><Icon name="plus" />올리기</button>}</div> : !visible.length ? <div className="empty-state"><Icon name="image" size={48} /><button className="button secondary" onClick={() => toggleFilter('all')}>필터 초기화</button></div> : <PhotoGrid ids={visibleIds} selected={selected} onSelectionChange={setSelected} selectionMode={selectionMode} disabled={busy || loading || !!viewerId || !!processingPhotoId || !!comparisonGroupId || managerOpen || needsNickname || !!downloadIds} columns={columns} maxColumns={maxColumns} onColumnsChange={setColumns}>{visible.map(photo => <PhotoCard key={photo.id} photo={photo} member={member} members={members} selectionMode={selectionMode} selected={selected.has(photo.id)} onSelect={() => selectPhoto(photo.id)} onView={() => { if (selectionMode) { selectPhoto(photo.id); return; } const stack = stacks.find(value => value.representative.id === photo.id); if (stack && stack.photos.length > 1) { setComparisonPage(0); setComparisonGroupId(stack.id); } else setViewerId(photo.id); }} stackCount={stacksByPhoto.get(photo.id)?.photos.length} stackPhotos={stacksByPhoto.get(photo.id)?.photos} busy={busy} onProcessing={() => setProcessingPhotoId(photo.id)} />)}{!inTrash && <button className="add-card" aria-label="사진 더 올리기" disabled={busy || queuedFiles.length > 0} onClick={openFilePicker}><Icon name="plus" size={32} /></button>}</PhotoGrid>}
+          </section> : loading ? <div className="empty-state" aria-label="보관함 불러오는 중"><span className="loading-dot" /></div> : photos.length === 0 ? <div className="empty-state"><Icon name={inTrash ? "trash" : "image"} size={56} />{!inTrash && <button className="button primary" aria-label="첫 사진 올리기" disabled={busy || queuedFiles.length > 0} onClick={openFilePicker}><Icon name="plus" />올리기</button>}</div> : !visible.length ? <div className="empty-state"><Icon name="image" size={48} /><button className="button secondary" onClick={() => toggleFilter('all')}>필터 초기화</button></div> : <PhotoGrid ids={visibleIds} selected={selected} onSelectionChange={setSelected} selectionMode={selectionMode} disabled={browsingBusy || loading || !!viewerId || !!processingPhotoId || !!comparisonGroupId || managerOpen || needsNickname || !!downloadIds} columns={columns} maxColumns={maxColumns} onColumnsChange={setColumns}>{visible.map(photo => <PhotoCard key={photo.id} photo={photo} member={member} members={members} selectionMode={selectionMode} selected={selected.has(photo.id)} onSelect={() => selectPhoto(photo.id)} onView={() => { if (selectionMode) { selectPhoto(photo.id); return; } const stack = stacks.find(value => value.representative.id === photo.id); if (!uploadPhase && stack && stack.photos.length > 1) { setComparisonPage(0); setComparisonGroupId(stack.id); } else setViewerId(photo.id); }} stackCount={stacksByPhoto.get(photo.id)?.photos.length} stackPhotos={stacksByPhoto.get(photo.id)?.photos} busy={browsingBusy} onProcessing={() => setProcessingPhotoId(photo.id)} />)}{!inTrash && <button className="add-card" aria-label="사진 더 올리기" disabled={busy || queuedFiles.length > 0} onClick={openFilePicker}><Icon name="plus" size={32} /></button>}</PhotoGrid>}
         </section>
       </>}
     </main>
-    {pickerPending && !uploadPhase && <aside className="upload-status picker-status" role="status" aria-label="사진 준비 중"><span className="upload-spinner" aria-hidden="true" /><button className="icon-button" aria-label="선택 취소" onClick={() => { pickerSource.current = { epoch: -1, albumId: undefined, local: false }; setPickerPending(false); }}><Icon name="close" /></button></aside>}
+    {pickerPending && !uploadPhase && <aside className="upload-status picker-status" role="status" aria-label="사진 준비 중"><span className="upload-spinner" aria-hidden="true" /><button className="icon-button" aria-label="선택 취소" onClick={() => { pickerSource.current = { epoch: -1, albumId: undefined, local: false }; setPickerPending(false); recoveringSelection.current = false; }}><Icon name="close" /></button></aside>}
     {uploadSummary && !pickerPending && <aside className="upload-status batch-status" role="status" aria-label={uploadPhase === 'preparing' ? '사진 준비 중' : uploadPhase === 'finishing' ? '사진 목록 갱신 중' : uploadPhase ? '사진 업로드 중' : queuedFiles.length ? (error ? '업로드 중단' : '업로드 일시정지') : '업로드 완료'}>
       {uploadPhase && !stopRequested ? <span className="upload-spinner" aria-hidden="true" /> : <Icon name={error ? 'alert' : queuedFiles.length || stopRequested ? 'pause' : 'check'} />}
       <div className="batch-meters"><div><output aria-label="완료 파일">{uploadSummary.done}/{uploadSummary.total}</output><output aria-label="완료 용량">{formatBytes(uploadSummary.bytes)} / {formatBytes(uploadSummary.totalBytes)}</output></div><progress aria-label="업로드 진행" max={Math.max(1, uploadSummary.total)} value={uploadPhase === 'preparing' || uploadPhase === 'uploading' && !uploadSummary.done ? undefined : uploadSummary.done} /></div>
@@ -1041,7 +1153,8 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
       })}</div>}<div className="download-capacity"><span>{formatBytes(downloadSize)}</span>{downloadParts.length > 1 && <span>{downloadParts.length} 묶음</span>}{downloadParts.length === 1 && (normalizedDownloadIds?.length ?? 0) > 1 && <span>/ {formatBytes(MAX_ARCHIVE_BYTES)}</span>}</div>
       {busy && progress && <div className="queue-progress"><progress value={progress.done} max={progress.total} aria-label="다운로드 진행" /><output>{progress.done}/{progress.total}</output></div>}
       <div className="download-list">{(normalizedDownloadIds ?? []).map(id => photos.find(photo => photo.id === id)).filter((photo): photo is Photo => !!photo).map(photo => <div key={photo.id} className="download-item"><div className="download-thumb"><Preview photo={photo} /></div><div className="download-item-info"><strong>{photo.name}</strong><small>{formatBytes(photo.size)}</small><span role="img" aria-label={photo.receivedBy.includes(member) ? '받았음 확인' : photo.requestedBy.includes(member) ? '다운로드 요청됨' : '아직 요청하지 않음'}><Icon name={photo.receivedBy.includes(member) ? 'check' : photo.requestedBy.includes(member) ? 'download' : 'image'} size={16} /></span></div><button className="icon-button" aria-label={`${photo.name} 다운로드 선택 해제`} disabled={busy} onClick={() => setDownloadIds(current => current?.filter(id => representativeDownloadIds([id], stacks)[0] !== photo.id) ?? null)}><Icon name="close" /></button><div className="receipt-actions">{photo.requestedBy.includes(member) && <><button className="icon-button" disabled={busy} aria-label="받았음 확인" aria-pressed={photo.receivedBy.includes(member)} onClick={() => void mutate(() => downloadState([photo.id], photo.receivedBy.includes(member) ? 'reset' : 'received'))}><Icon name="check" /></button><button className="icon-button" disabled={busy} aria-label="기록 되돌리기" onClick={() => void mutate(() => downloadState([photo.id], 'reset'))}><Icon name="retry" /></button></>}</div><button className="icon-button outlined" disabled={busy || !downloadReady} aria-label={`${photo.name} 원본 다운로드`} onClick={() => void download(photo)}><Icon name="download" /></button></div>)}</div></Modal>}
-    {managerOpen && <Modal label="공유보관함 관리" onClose={dismissManager} className="download-dialog shared-dialog"><header className="dialog-header"><div><h2>{incomingInvite ? '참여' : !remote ? '로그인' : { create: '새 보관함', join: '초대 참여', invite: '친구 초대', settings: '보관함 설정', account: '계정' }[managerView]}</h2>{!incomingInvite && remote?.album && ['invite', 'settings'].includes(managerView) && <strong className="dialog-context">{remote.album.title}</strong>}</div><button className="icon-button" disabled={busy} aria-label="공유보관함 관리 닫기" onClick={dismissManager}><Icon name="close" /></button></header>
+    {memberRemoval && <Modal label="멤버 변경 확인" onClose={() => { if (!busy) setMemberRemoval(null); }} className="download-dialog"><header className="dialog-header"><h2>{memberRemoval.name}</h2><button className="icon-button" aria-label="멤버 변경 취소" disabled={busy} onClick={() => setMemberRemoval(null)}><Icon name="close" /></button></header>{errorControl()}<button className="button primary" disabled={busy} onClick={() => void removeMember()}>{memberRemoval.id === remote?.userId ? '나가기' : '내보내기'}</button></Modal>}
+    {managerOpen && !memberRemoval && <Modal label="공유보관함 관리" onClose={dismissManager} className="download-dialog shared-dialog"><header className="dialog-header"><div><h2>{incomingInvite ? '참여' : !remote ? '로그인' : { create: '새 보관함', join: '초대 참여', invite: '친구 초대', settings: '보관함 설정', account: '계정' }[managerView]}</h2>{!incomingInvite && remote?.album && ['invite', 'settings'].includes(managerView) && <strong className="dialog-context">{remote.album.title}</strong>}</div><button className="icon-button" disabled={busy} aria-label="공유보관함 관리 닫기" onClick={dismissManager}><Icon name="close" /></button></header>
       {!incomingInvite && errorControl()}{!remote ? <div className="connect-actions">{incomingInvite && errorControl()}{approvalCode !== null && <section className="approval-pending" aria-label="계정 승인 대기"><Icon name="lock" size={40} /><output aria-label="계정 코드">{approvalCode}</output><button className="icon-button" disabled={busy || loading} aria-label="새로고침" onClick={() => void connectShared()}><Icon name="retry" /></button></section>}
         {googleButton()}<button className="button secondary" disabled={busy || loading || !passkeySupported()} onClick={() => void connectShared(true)}>패스키로 로그인</button><button className="button secondary" disabled={busy || loading} onClick={() => void connectShared()}>기기 계정으로 계속</button>
         {approvalCode !== null && <button className="button secondary" disabled={busy || !passkeySupported()} onClick={() => void mutate(async () => { await registerPasskey(); setPasskeyRegistered(true); return []; }, '패스키 등록 완료')}>{passkeyRegistered ? <Icon name="check" /> : <Icon name="lock" />}패스키 등록</button>}
@@ -1057,8 +1170,8 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
         {managerView === 'create' && <form className="shared-form focused-form" onSubmit={event => { event.preventDefault(); void createSharedAlbum(); }}><label htmlFor="album-name">보관함 이름</label><input id="album-name" aria-label="보관함 이름" value={albumTitle} maxLength={80} required onChange={event => setAlbumTitle(event.target.value)} disabled={busy} /><label htmlFor="owner-nickname">닉네임</label><input id="owner-nickname" aria-label="닉네임" value={ownerNickname} maxLength={24} required autoComplete="nickname" onChange={event => setOwnerNickname(event.target.value)} disabled={busy} /><button className="button primary" disabled={busy || !albumTitle.trim() || !ownerNickname.trim()}>만들기</button></form>}
         {managerView === 'join' && <form className="shared-form focused-form" onSubmit={event => { event.preventDefault(); void joinSharedAlbum(); }}><label htmlFor="invite-token">초대 코드</label><input id="invite-token" aria-label="초대 코드" value={inviteToken} onChange={event => setInviteToken(event.target.value)} maxLength={2048} required disabled={busy} aria-invalid={!!error && !!inviteToken} /><button className="button primary" disabled={busy || !inviteToken.trim()}>참여</button></form>}
         {managerView === 'invite' && inviteLink && <section className="invite-panel" aria-label="친구 초대"><label htmlFor="share-link">초대 링크</label><input id="share-link" aria-label="초대 링크" value={inviteLink} readOnly onFocus={event => event.target.select()} /><div className="invite-actions">{typeof navigator.share === 'function' && <button className="button primary" disabled={busy} onClick={() => void shareInvite()}><Icon name="share" />공유하기</button>}<button className={`button ${typeof navigator.share === 'function' ? 'secondary' : 'primary'}`} aria-label="초대 링크 복사" disabled={busy} onClick={async () => { try { await navigator.clipboard.writeText(inviteLink); setCopied(true); } catch { setCopied(false); document.getElementById('share-link')?.focus(); } }}><Icon name={copied ? 'check' : 'copy'} />링크 복사</button></div><dl className="invite-expiry"><dt>만료</dt><dd><time dateTime={new Date(inviteExpires).toISOString()}>{new Date(inviteExpires).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</time></dd></dl><button className="text-button invite-renew" disabled={busy} onClick={() => void invite(true)}><Icon name="retry" size={17} />링크 재발급</button></section>}
-        {managerView === 'settings' && remote.album && <section className="member-settings" aria-label="보관함 설정"><h3>멤버 <span>{remote.members.length}</span></h3><ul className="settings-member-list">{remote.members.map(value => <li key={value.id}><span className="avatar" aria-hidden="true" style={{ background: value.color }}>{value.name.slice(0, 1)}</span><span>{value.name}</span>{value.id === remote.album!.ownerId && <span role="img" aria-label="보관함 주인"><Icon name="star" size={16} /></span>}</li>)}</ul><form className="member-name-form" onSubmit={event => { event.preventDefault(); void saveNickname(); }}><label htmlFor="own-nickname">내 닉네임<input id="own-nickname" aria-label="내 닉네임" value={nickname} maxLength={24} required disabled={busy} onChange={event => setNickname(event.target.value)} /></label><button className="button secondary" disabled={busy || !nickname.trim()}>저장</button></form></section>}
-        {managerView === 'account' && <div className="account-actions">{googleButton(true)}<button className="button secondary" disabled={busy || !passkeySupported()} onClick={() => void mutate(async () => { await registerPasskey(); setPasskeyRegistered(true); return photos; }, '패스키 등록 완료')}>{passkeyRegistered ? <Icon name="check" /> : <Icon name="lock" />}패스키 등록</button><button className="button secondary" disabled={busy} onClick={() => void returnLocal()}><Icon name="image" />기기 보관함</button></div>}
+        {managerView === 'settings' && remote.album && <section className="member-settings" aria-label="보관함 설정"><h3>멤버 <span>{remote.members.length}</span></h3>{remote.album.ownerId !== remote.userId && <button className="button secondary" disabled={busy} onClick={() => setMemberRemoval({ id: remote.userId, name: remote.album!.title })}>보관함 나가기</button>}<ul className="settings-member-list">{remote.members.map(value => <li key={value.id}><span className="avatar" aria-hidden="true" style={{ background: value.color }}>{value.name.slice(0, 1)}</span><span>{value.name}</span>{value.id === remote.album!.ownerId && <span role="img" aria-label="보관함 주인"><Icon name="star" size={16} /></span>}{remote.album!.ownerId === remote.userId && value.id !== remote.userId && <button className="icon-button" aria-label={`${value.name} 내보내기`} disabled={busy} onClick={() => setMemberRemoval({ id: value.id, name: value.name })}><Icon name="minus" /></button>}</li>)}</ul><form className="member-name-form" onSubmit={event => { event.preventDefault(); void saveNickname(); }}><label htmlFor="own-nickname">내 닉네임<input id="own-nickname" aria-label="내 닉네임" value={nickname} maxLength={24} required disabled={busy} onChange={event => setNickname(event.target.value)} /></label><button className="button secondary" disabled={busy || !nickname.trim()}>저장</button></form></section>}
+        {managerView === 'account' && <div className="account-actions"><div className="account-identity"><span>계정</span><code>{remote.userId}</code></div>{GOOGLE_LOGIN_ENABLED && <button className="button secondary" disabled={busy} onClick={() => void switchGoogleAccount()}>Google 계정 전환</button>}<button className="button secondary" disabled={busy} onClick={signOut}>로그아웃</button>{googleButton(true)}<button className="button secondary" disabled={busy || !passkeySupported()} onClick={() => void mutate(async () => { await registerPasskey(); setPasskeyRegistered(true); return photos; }, '패스키 등록 완료')}>{passkeyRegistered ? <Icon name="check" /> : <Icon name="lock" />}패스키 등록</button><button className="button secondary" disabled={busy} onClick={() => void returnLocal()}><Icon name="image" />기기 보관함</button></div>}
       </>}
     </Modal>}
   </div></ApprovalContext.Provider>;

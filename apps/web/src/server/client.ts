@@ -35,6 +35,7 @@ export interface ClientOptions {
   fetch?: typeof fetch
   subtle?: SubtleCrypto
   now?: () => number
+  isSignedOut?: () => boolean
 }
 
 const ECDSA = { name: 'ECDSA', namedCurve: 'P-256' } as const
@@ -73,6 +74,7 @@ export class ServerClient {
   private pendingKeys?: Promise<CryptoKeyPair>
   private adopting?: Promise<void>
   private generation = 0
+  private suspended = false
   private readonly fetch: typeof fetch
   private readonly subtle: SubtleCrypto
   private readonly now: () => number
@@ -116,7 +118,22 @@ export class ServerClient {
     this.pending = undefined
   }
 
+  suspendSession(): void {
+    this.suspended = true
+    this.resetSession()
+  }
+
+  resumeSession(): void {
+    this.resetSession()
+    this.suspended = false
+  }
+
+  private checkSignedInAllowed(): void {
+    if (this.suspended || this.opts.isSignedOut?.()) throw new ServerError(401, '로그인이 필요해요.')
+  }
+
   private checkGeneration(generation: number): void {
+    this.checkSignedInAllowed()
     if (generation !== this.generation) throw new ServerError(0, '로그인 상태가 변경됐어요. 다시 연결해 주세요.')
   }
 
@@ -131,9 +148,12 @@ export class ServerClient {
   }
 
   private async send(path: string, init: RequestInit): Promise<Response> {
+    this.checkSignedInAllowed()
+    const generation = this.generation
     const url = this.requestUrl(path)
+    let response: Response
     try {
-      return await this.fetch(url, {
+      response = await this.fetch(url, {
         ...init,
         // Redirects can forward upload bodies and signed authentication proofs.
         redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer',
@@ -141,25 +161,32 @@ export class ServerClient {
     } catch {
       throw new ServerError(0, '서버에 연결하지 못했어요. 네트워크와 서버 상태를 확인해 주세요.')
     }
+    this.checkGeneration(generation)
+    return response
   }
 
   private async postJson<T>(path: string, body?: unknown): Promise<T> {
+    const generation = this.generation
     const res = await this.send(path, {
       method: 'POST',
       headers: body === undefined ? undefined : { 'content-type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body),
     })
     const data: unknown = await res.json().catch(() => ({}))
+    this.checkGeneration(generation)
     if (!res.ok) throw responseError(data, res.status)
     return data as T
   }
 
   private async signIn(): Promise<Session> {
+    const generation = this.generation
     const keys = await this.deviceKeys()
+    this.checkGeneration(generation)
     const { challenge } = await this.postJson<{ challenge: string }>('/auth/challenge')
     const message = new TextEncoder().encode(`mlhops-auth-v1:${challenge}`)
     const signature = await this.subtle.sign(SIGN, keys.privateKey, message)
     const jwk = await this.subtle.exportKey('jwk', keys.publicKey)
+    this.checkGeneration(generation)
     const res = await this.postJson<{ access_token: string; expires_in: number; user_id: string }>(
       '/auth/token',
       {
@@ -178,7 +205,9 @@ export class ServerClient {
 
   /** 동시에 여러 요청이 와도 로그인은 한 번만 한다. */
   async token(): Promise<string> {
+    this.checkSignedInAllowed()
     if (this.adopting) await this.adopting
+    this.checkSignedInAllowed()
     if (this.session && this.now() < this.session.refreshAt) return this.session.token
     if (!this.pending) {
       const generation = this.generation
@@ -244,6 +273,7 @@ export class ServerClient {
 
   /** Google's one-time capability binds a fresh device key without passkey-only /auth/link. */
   async completeGoogleAuth(code: string, verifier: string, expectedUserId?: string, expectedDeviceFingerprint?: string | null): Promise<string> {
+    this.checkSignedInAllowed()
     if (!/^[A-Za-z0-9_-]{43}$/.test(code) || !/^[A-Za-z0-9_-]{43}$/.test(verifier)) {
       throw new ServerError(0, '올바르지 않은 Google 로그인 요청이에요.')
     }
@@ -300,6 +330,7 @@ export class ServerClient {
    * 연결한 뒤에야 저장해 두므로, 연결에 실패하면 이 기기의 원래 계정이 그대로 남는다.
    */
   async adoptAccount(login: { access_token: string; expires_in: number; user_id: string }): Promise<void> {
+    this.checkSignedInAllowed()
     if (this.adopting) throw new ServerError(0, '계정 연결이 이미 진행 중이에요.')
     const generation = ++this.generation
     this.pending = undefined

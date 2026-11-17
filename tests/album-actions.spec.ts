@@ -143,3 +143,55 @@ for (const [name, viewport] of [['desktop', { width: 1440, height: 1000 }], ['mo
     await page.screenshot({ path: `.local/ui-toolbar/after-invite-${name}.png`, fullPage: true });
   });
 }
+
+test('logout clears the account surface, survives reload and explicit login reuses the device identity', async ({ page }) => {
+  const keys: unknown[] = [];
+  page.on('request', request => {
+    if (new URL(request.url()).pathname === '/auth/token') keys.push(request.postDataJSON().public_key);
+  });
+  const fixture = await sharedAlbum(page); await fixture.open();
+  await page.getByRole('button', { name: '계정', exact: true }).click();
+  await expect(manager(page).locator('code')).toHaveText(userId);
+  await page.getByRole('button', { name: '로그아웃', exact: true }).click();
+  await expect(page.getByRole('region', { name: '로그인', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: fixture.album.title, exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '계정', exact: true })).toHaveCount(0);
+  expect(keys).toHaveLength(1);
+  const requests: string[] = [];
+  page.on('request', request => { if (new URL(request.url()).pathname.startsWith('/auth/')) requests.push(request.url()); });
+  await page.reload();
+  await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
+  await expect(page.getByRole('region', { name: '로그인', exact: true })).toBeVisible();
+  expect(requests).toEqual([]);
+  await page.getByRole('button', { name: '기기 계정으로 계속', exact: true }).click();
+  await expect(page.getByRole('region', { name: '여행 보관함 목록', exact: true })).toBeVisible();
+  expect(keys).toHaveLength(2);
+  expect(keys[1]).toEqual(keys[0]);
+  await fixture.open();
+  await expect(page.getByRole('heading', { name: fixture.album.title, exact: true })).toBeVisible();
+});
+
+test('logout from another tab clears protected screens and rejects a late album refresh', async ({ page, context }) => {
+  const fixture = await sharedAlbum(page); await fixture.open();
+  let release!: () => void;
+  let started = false;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  await page.route('**/op/phogaem-album-get/v1*', async route => {
+    started = true; await held;
+    await route.fulfill({ json: { album: fixture.album, members: [{ id: userId, name: '나', nickname: '나', color: '#c5d6c4' }], photos: [] } });
+  });
+  const sibling = await context.newPage();
+  try {
+    await sibling.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic logout tab</title>' }));
+    await sibling.goto('./');
+    await page.getByRole('button', { name: '새로고침', exact: true }).click();
+    await expect.poll(() => started).toBe(true);
+    await sibling.evaluate(() => localStorage.setItem('phogaem:/phogaem/:signed-out', 'true'));
+    await expect(page.getByRole('region', { name: '로그인', exact: true })).toBeVisible();
+    release();
+    await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
+    await expect(page.getByRole('heading', { name: fixture.album.title, exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '계정', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('group', { name: '작업 실패', exact: true })).toHaveCount(0);
+  } finally { release(); await sibling.close(); }
+});

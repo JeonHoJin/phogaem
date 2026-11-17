@@ -313,3 +313,7 @@ export function setMemberNickname(albumId: string, nickname: string, userId?: st
 export async function setSharedTrashState(albumId: string, photoIds: string[], trashed: boolean): Promise<void> {
   await json('trash-set', { albumId, photoIds, trashed });
 }
+
+export async function removeAlbumMember(albumId: string, userId: string): Promise<void> {
+  await json('member-remove', { albumId, userId });
+}
