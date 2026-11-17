@@ -416,3 +416,50 @@ test('invalid files can be excluded as a batch while valid pending originals rem
   await expect(page.getByRole('status', { name: '업로드 완료', exact: true })).toContainText('1/1');
   expect(model.uploads).toEqual(['valid.png']);
 });
+
+test('cross-tab logout during recovery hashing cannot restore photos or start uploads', async ({ page, context }) => {
+  const model = await openShared(page, 1);
+  await page.evaluate(async ({ userId, albumId, hash, size }) => {
+    const path = '/phogaem/src/uploadRecovery.ts';
+    const recovery = await import(path) as typeof import('../apps/web/src/uploadRecovery.ts');
+    recovery.saveUploadRecovery({ userId, albumId }, { version: 1, plannedCount: 2, completed: [{ hash, size, type: 'image/png', count: 1 }] });
+  }, { userId, albumId, hash: createHash('sha256').update(pixel).digest('hex'), size: pixel.length });
+  await page.reload();
+  await page.getByRole('button', { name: album.title, exact: false }).click();
+  await expect(page.getByRole('region', { name: '중단된 업로드', exact: true })).toContainText('1/2');
+  await page.evaluate(() => {
+    const original = File.prototype.arrayBuffer;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    Object.assign(window, { recoveryHashStarted: false, recoveryHashFinished: false, releaseRecoveryHash: release });
+    File.prototype.arrayBuffer = async function () {
+      Object.assign(window, { recoveryHashStarted: true });
+      await held;
+      const result = await original.call(this);
+      Object.assign(window, { recoveryHashFinished: true });
+      return result;
+    };
+  });
+  const sibling = await context.newPage();
+  try {
+    await sibling.route('**/*', route => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>Synthetic logout tab</title>' }));
+    await sibling.goto('./');
+    const chooserPromise = page.waitForEvent('filechooser');
+    await page.getByRole('button', { name: '다시 선택', exact: true }).click();
+    await (await chooserPromise).setFiles([file('existing-0.png')]);
+    await page.waitForFunction(() => (window as unknown as { recoveryHashStarted: boolean }).recoveryHashStarted);
+    await sibling.evaluate(() => localStorage.setItem('phogaem:/phogaem/:signed-out', 'true'));
+    await expect(page.getByRole('region', { name: '로그인', exact: true })).toBeVisible();
+    await page.evaluate(() => (window as unknown as { releaseRecoveryHash: () => void }).releaseRecoveryHash());
+    await page.waitForFunction(() => (window as unknown as { recoveryHashFinished: boolean }).recoveryHashFinished);
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 0)))));
+    await expect(page.locator('article.photo-card')).toHaveCount(0);
+    await expect(page.getByRole('region', { name: '업로드 파일', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('status', { name: /사진 (준비|업로드|목록 갱신) 중/ })).toHaveCount(0);
+    await expect(page.getByRole('region', { name: '중단된 업로드', exact: true })).toHaveCount(0);
+    expect(model.uploads).toEqual([]);
+  } finally {
+    await page.evaluate(() => (window as unknown as { releaseRecoveryHash: () => void }).releaseRecoveryHash());
+    await sibling.close();
+  }
+});

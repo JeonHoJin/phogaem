@@ -540,11 +540,14 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
         const remaining: File[] = [];
         for (const file of files) {
           if (uploadEpoch !== sourceEpoch.current) return [];
-          if (await matcher.consume(file)) { baseDone += 1; baseBytes += file.size; }
+          const completed = await matcher.consume(file);
+          if (uploadEpoch !== sourceEpoch.current) return [];
+          if (completed) { baseDone += 1; baseBytes += file.size; }
           else remaining.push(file);
           setProgress({ done: baseDone, total });
           await afterPaint();
         }
+        if (uploadEpoch !== sourceEpoch.current) return [];
         files = remaining;
         startingPhotos = latest.photos.map(photo => ({ ...photo, albumId: recoveryScope.albumId }));
         setPhotos(startingPhotos);
