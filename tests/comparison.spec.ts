@@ -751,3 +751,84 @@ test('candidate outage cannot download a selected photo removed from the fresh a
   expect(model.originals).toEqual([]);
   expect(model.mutations).toEqual([]);
 });
+
+async function openSplitDownload(page: Page) {
+  const model = await openShared(page, 3);
+  // Only metadata is large; original responses stay synthetic and tiny.
+  model.photos.forEach(photo => { photo.size = 128 * 1024 * 1024; });
+  await page.getByRole('button', { name: '새로고침', exact: true }).click();
+  await expect(page.locator('main')).toHaveAttribute('aria-busy', 'false');
+  await page.getByRole('checkbox', { name: '현재 사진 전체 선택', exact: true }).check();
+  await page.getByRole('button', { name: '선택 다운로드', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: '선택 사진 다운로드', exact: true });
+  await expect(dialog.getByRole('group', { name: '나눠 받기', exact: true })).toBeVisible();
+  return { model, dialog };
+}
+
+test('large selections form bounded parts and each explicit click retrieves only its own originals', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const { model, dialog } = await openSplitDownload(page);
+  const first = dialog.getByRole('button', { name: '1/2 묶음 다운로드', exact: true });
+  const second = dialog.getByRole('button', { name: '2/2 묶음 다운로드', exact: true });
+  await expect(first).toContainText('256');
+  await expect(second).toContainText('128');
+  expect(model.originals).toEqual([]);
+  const bounds = await first.boundingBox();
+  expect(bounds!.height).toBeGreaterThanOrEqual(44);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const firstEvent = page.waitForEvent('download');
+  await first.click();
+  expect((await firstEvent).suggestedFilename()).toBe('phogaem-01.zip');
+  await expect(dialog.getByRole('button', { name: '1/2 묶음 다시 다운로드', exact: true })).toBeEnabled();
+  expect(model.originals).toEqual([photoId(0), photoId(1)]);
+  expect(model.photos.every(photo => photo.receivedBy.length === 0)).toBe(true);
+  const secondEvent = page.waitForEvent('download');
+  await second.click();
+  const download = await secondEvent;
+  expect(download.suggestedFilename()).toBe('photo-3.png');
+  expect(await readFile((await download.path())!)).toEqual(originalBytes(photoId(2)));
+  await expect(dialog.getByRole('button', { name: '2/2 묶음 다시 다운로드', exact: true })).toBeEnabled();
+  expect(model.originals).toEqual([photoId(0), photoId(1), photoId(2)]);
+  expect(model.mutations.map(value => value.body)).toEqual([
+    { albumId, photoIds: [photoId(0), photoId(1)], state: 'requested' },
+    { albumId, photoIds: [photoId(2)], state: 'requested' },
+  ]);
+  expect(model.photos.every(photo => photo.receivedBy.length === 0)).toBe(true);
+  await mkdir('.local/download-parts', { recursive: true });
+  await page.screenshot({ path: '.local/download-parts/mobile.png' });
+  await dialog.getByRole('button', { name: '다운로드 창 닫기', exact: true }).click();
+  await page.getByRole('button', { name: '선택 다운로드', exact: true }).click();
+  await expect(dialog.getByRole('button', { name: '1/2 묶음 다운로드', exact: true })).toBeEnabled();
+  await expect(dialog.getByRole('button', { name: '2/2 묶음 다운로드', exact: true })).toBeEnabled();
+  expect(model.photos.every(photo => photo.requestedBy.includes(userId))).toBe(true);
+  expect(model.photos.every(photo => photo.receivedBy.length === 0)).toBe(true);
+});
+
+test('a failed later download part preserves earlier requests and retry retrieves only the failed part', async ({ page }) => {
+  const { model, dialog } = await openSplitDownload(page);
+  const firstEvent = page.waitForEvent('download');
+  await dialog.getByRole('button', { name: '1/2 묶음 다운로드', exact: true }).click();
+  await firstEvent;
+  await expect(dialog.getByRole('button', { name: '1/2 묶음 다시 다운로드', exact: true })).toBeEnabled();
+  let fail = true;
+  await page.route('**/op/phogaem-photo-get/v1*', async route => {
+    if (new URL(route.request().url()).searchParams.get('photoId') === photoId(2) && fail) {
+      await route.fulfill({ status: 503, json: { error: 'synthetic unavailable original' } });
+    } else await route.fallback();
+  });
+  const second = dialog.getByRole('button', { name: '2/2 묶음 다운로드', exact: true });
+  await second.click();
+  await expect(dialog.getByRole('group', { name: '작업 실패', exact: true })).toBeVisible();
+  await expect(second).toBeEnabled();
+  await expect(dialog.getByRole('button', { name: '1/2 묶음 다시 다운로드', exact: true })).toBeEnabled();
+  expect(model.photos[2]!.requestedBy).toEqual([]);
+  expect(model.originals).toEqual([photoId(0), photoId(1)]);
+  fail = false;
+  const retryEvent = page.waitForEvent('download');
+  await second.click();
+  await retryEvent;
+  await expect(dialog.getByRole('button', { name: '2/2 묶음 다시 다운로드', exact: true })).toBeEnabled();
+  expect(model.originals).toEqual([photoId(0), photoId(1), photoId(2)]);
+  expect(model.mutations).toHaveLength(2);
+  expect(model.photos.every(photo => photo.receivedBy.length === 0)).toBe(true);
+});

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { crc32 } from 'node:zlib';
-import { createPhotoArchive, validateArchiveSize, MAX_ARCHIVE_BYTES } from '../apps/web/src/archive.ts';
+import { createPhotoArchive, splitArchiveItems, validateArchiveSize, MAX_ARCHIVE_BYTES } from '../apps/web/src/archive.ts';
 
 // Parse the directory independently, then follow its local offsets and verify both records.
 async function extract(blob: Blob): Promise<Array<{ name: string; bytes: Uint8Array }>> {
@@ -87,4 +87,35 @@ test('archive rejects oversized/invalid metadata before reading any original', a
   const blob = { size: MAX_ARCHIVE_BYTES + 1, stream: () => { read = true; throw new Error('must not read'); } } as unknown as Blob;
   await assert.rejects(createPhotoArchive([{ name: 'large.jpg', blob }]));
   assert.equal(read, false);
+});
+
+test('archive partitions preserve selection order and identity at exact byte boundaries', () => {
+  const items = [0, MAX_ARCHIVE_BYTES - 1, 1, 1, MAX_ARCHIVE_BYTES - 1, MAX_ARCHIVE_BYTES, 0]
+    .map((size, id) => Object.freeze({ size, id }));
+  const groups = splitArchiveItems(items);
+  assert.deepEqual(groups.map(group => group.map(item => item.id)), [[0, 1, 2], [3, 4], [5, 6]]);
+  assert.deepEqual(groups.flat(), items);
+  groups.flat().forEach((item, index) => assert.equal(item, items[index]));
+  groups.forEach(group => validateArchiveSize(group.map(item => item.size)));
+  assert.deepEqual(splitArchiveItems([]), []);
+});
+
+test('archive partitions split at ZIP entry count even when bytes fit', () => {
+  const items = Array.from({ length: 65537 }, (_, id) => ({ id, size: 0 }));
+  const groups = splitArchiveItems(items);
+  assert.deepEqual(groups.map(group => group.length), [65535, 2]);
+  assert.deepEqual(groups.flat(), items);
+  groups.forEach(group => validateArchiveSize(group.map(item => item.size)));
+});
+
+test('archive partitioning rejects invalid or individually oversized items without mutation', () => {
+  for (const size of [-1, Number.NaN, Infinity, 0.5, Number.MAX_SAFE_INTEGER + 1, MAX_ARCHIVE_BYTES + 1]) {
+    const first = { size: 1 };
+    const invalid = { size };
+    const items = [first, invalid];
+    assert.throws(() => splitArchiveItems(items));
+    assert.equal(items.length, 2);
+    assert.equal(items[0], first);
+    assert.equal(items[1], invalid);
+  }
 });

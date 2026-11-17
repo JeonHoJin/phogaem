@@ -135,3 +135,5 @@ Bulk uploads retain a fixed numeric completed/total and committed-byte summary, 
 Authentication controls name their actual method: Google로 로그인, 패스키로 로그인, 기기 계정으로 계속. Google has a full visible label and the primary position; device-local entry remains secondary. Preserve existing approval and explicit identity creation boundaries.
 
 Download remains available when similarity lookup is unavailable. Recheck the active album before retrieval; only network/5xx similarity failures permit exact selected active originals as fallback. Authorization, missing-resource and conflict failures remain blocking. Successful similarity responses retain representative-only resolution.
+
+Large downloads automatically partition selected representatives in stable order into at most 256MiB per part. Each part has an explicit download action, fraction, item count and byte size. One click retrieves one part; do not silently trigger multiple browser downloads. Requested parts expose a retry icon, never a received checkmark. Preserve existing per-photo receipt confirmation. Partial/failed parts remain retryable and fresh active membership/representative checks apply to each request.

@@ -15,6 +15,25 @@ export function validateArchiveSize(sizes: number[]): void {
   }
 }
 
+/** Partition metadata in selection order without reading or copying original bytes. */
+export function splitArchiveItems<T extends { size: number }>(items: T[]): T[][] {
+  const groups: T[][] = [];
+  let group: T[] = [];
+  let total = 0;
+  for (const item of items) {
+    validateArchiveSize([item.size]);
+    if (group.length && (group.length === MAX_ENTRIES || total + item.size > MAX_ARCHIVE_BYTES)) {
+      groups.push(group);
+      group = [];
+      total = 0;
+    }
+    group.push(item);
+    total += item.size;
+  }
+  if (group.length) groups.push(group);
+  return groups;
+}
+
 function shorten(value: string, maxBytes: number): string {
   let length = 0;
   let result = '';

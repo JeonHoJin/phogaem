@@ -14,7 +14,7 @@ import { inviteShareUrl, inviteTokenFromInput } from './server/invite';
 import googleSignInIcon from './assets/google-sign-in.svg';
 import type { ChangeEvent, DragEvent, ReactNode } from 'react';
 import { server, ServerError } from './server/index';
-import { createPhotoArchive, validateArchiveSize, MAX_ARCHIVE_BYTES } from './archive';
+import { createPhotoArchive, validateArchiveSize, splitArchiveItems, MAX_ARCHIVE_BYTES } from './archive';
 import { isTrashed, isVideo, MEMBERS, defaultAlbumName, mergeUploadedPhoto, filterPhotos, formatBytes, matchesFilters, buildPhotoStacks, representativeDownloadIds } from './domain';
 import type { MemberId, Photo, PhotoFilter, ProcessingKind, ProcessingJob } from './domain';
 import { validateFile as validateLocalFile, importPhotos, loadPhotos, loadPreferences, savePreferences, seedDemo, setDownloadState, setTrashState } from './storage';
@@ -290,6 +290,8 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
   const [processingPhotoId, setProcessingPhotoId] = useState<string | null>(null);
   const [viewerId, setViewerId] = useState<string | null>(null);
   const [downloadIds, setDownloadIds] = useState<string[] | null>(null);
+  const [requestedDownloadIds, setRequestedDownloadIds] = useState<Set<string>>(new Set());
+  useEffect(() => { setRequestedDownloadIds(new Set()); }, [downloadIds]);
   const [dragging, setDragging] = useState(false);
   const [comparisonMode, setComparisonMode] = useState(false);
   const [candidates, setCandidates] = useState<SimilarPhotos | null>(null);
@@ -342,6 +344,7 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     catch { return false; }
   }), [busy, queuedFiles, rejectedFiles, remote]);
   const downloadSize = (normalizedDownloadIds ?? []).reduce((sum, id) => sum + (photos.find(photo => photo.id === id)?.size ?? 0), 0);
+  const downloadParts = useMemo(() => splitArchiveItems((normalizedDownloadIds ?? []).map(id => photos.find(photo => photo.id === id)).filter((photo): photo is Photo => !!photo)), [normalizedDownloadIds, photos]);
   const candidateGroups = useMemo(() => (candidates?.groups ?? []).map(group => {
     const ids = new Set(group.photoIds);
     const matches = filteredPhotos.filter(photo => photo.albumId === remote?.album?.id && ids.has(photo.id));
@@ -941,9 +944,9 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
       } else setError(reason instanceof Error ? reason.message : '사진 분리 실패');
     } finally { operation.current = false; setBusy(false); }
   }
-  async function downloadBatch() {
+  async function downloadBatch(partIds?: string[], partNumber?: number) {
     if (!downloadReady) return;
-    const ids = [...(downloadIds ?? [])];
+    const ids = [...(partIds ?? downloadIds ?? [])];
     if (!ids.length) return;
     await mutate(async () => {
       const batch = await resolveDownloadPhotos(ids);
@@ -959,9 +962,10 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
         const blob = batch.length === 1 ? entries[0]!.blob : await createPhotoArchive(entries);
         const url = URL.createObjectURL(blob);
         const anchor = document.createElement('a'); anchor.href = url;
-        anchor.download = batch.length === 1 ? batch[0]!.name : 'phogaem.zip';
+        anchor.download = batch.length === 1 ? batch[0]!.name : partNumber ? `phogaem-${String(partNumber).padStart(2, '0')}.zip` : 'phogaem.zip';
         document.body.append(anchor); anchor.click(); anchor.remove();
         window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        setRequestedDownloadIds(previous => new Set([...previous, ...batch.map(photo => photo.id)]));
         return downloadState(batch.map(photo => photo.id), 'requested');
       } finally { setProgress(null); }
     });
@@ -1031,7 +1035,10 @@ export default function App({ initialAuthError = '' }: { initialAuthError?: stri
     {comparisonGroupId && comparisonPhotos.length >= 2 && !viewerId && <Comparison key={comparisonGroupId} photos={comparisonPhotos} initialPage={comparisonPage} representativeId={stacks.find(stack => stack.id === comparisonGroupId)?.representative.id} onRepresentative={id => void chooseRepresentative(id)} onSeparate={id => void separatePhoto(id)} failure={error ? <div className="failure-controls" role="group" aria-label={separationRetry.current ? "사진 분리 실패" : "대표사진 변경 실패"}><Icon name="alert" /><span className="visually-hidden" role="alert">{error}</span>{(separationRetry.current || representativeRetryId.current) && <button className="icon-button" aria-label="재시도" disabled={busy} onClick={() => { const retry = separationRetry.current; if (retry) void separatePhoto(retry.photoId, retry.groupId); else if (representativeRetryId.current) void chooseRepresentative(representativeRetryId.current); }}><Icon name="retry" /></button>}<button className="icon-button" aria-label="오류 닫기" onClick={() => setError('')}><Icon name="close" /></button></div> : null} selected={selected} selectedCount={selectedPhotos.length} busy={busy} onSelect={id => selectPhoto(representativeDownloadIds([id], stacks)[0] ?? id)} onClose={() => setComparisonGroupId(null)} onView={(id, page) => { setComparisonPage(page); returnComparisonId.current = comparisonGroupId; setComparisonGroupId(null); setViewerId(id); }} onDownload={() => { setComparisonGroupId(null); returnComparisonId.current = null; setDownloadIds(selectedPhotos.map(photo => photo.id)); }} />}
     {viewerId && visible.length > 0 && <Viewer photos={returnComparisonId.current ? stacks.find(stack => stack.id === returnComparisonId.current)?.photos ?? photos.filter(photo => photo.id === viewerId) : visible} initialId={viewerId} busy={busy} trashMode={inTrash} canManage={canManagePhoto} onTrash={id => void moveToTrash([id], !inTrash)} onClose={() => { setViewerId(null); if (returnComparisonId.current) { setComparisonGroupId(returnComparisonId.current); returnComparisonId.current = null; } }} onDownload={id => { setViewerId(null); returnComparisonId.current = null; setDownloadIds(representativeDownloadIds([id], stacks)); }} onNotice={setNotice} />}
     {downloadIds && <Modal label="선택 사진 다운로드" onClose={() => { if (!busy) setDownloadIds(null); }} className="download-dialog"><header className="dialog-header"><h2>다운로드</h2><button className="icon-button" disabled={busy} aria-label="다운로드 창 닫기" onClick={() => setDownloadIds(null)}><Icon name="close" /></button></header>
-      {errorControl()}<button className="button primary batch-download" disabled={busy || !downloadReady || !normalizedDownloadIds?.length || (normalizedDownloadIds.length > 1 && downloadSize > MAX_ARCHIVE_BYTES)} onClick={() => void downloadBatch()}><Icon name="download" />일괄 다운로드 <span>{normalizedDownloadIds?.length}</span></button><div className="download-capacity"><span>{formatBytes(downloadSize)}</span>{(normalizedDownloadIds?.length ?? 0) > 1 && <span>/ {formatBytes(MAX_ARCHIVE_BYTES)}</span>}</div>
+      {errorControl()}{downloadParts.length <= 1 ? <button className="button primary batch-download" disabled={busy || !downloadReady || !normalizedDownloadIds?.length} onClick={() => void downloadBatch()}><Icon name="download" />일괄 다운로드 <span>{normalizedDownloadIds?.length}</span></button> : <div className="download-parts" role="group" aria-label="나눠 받기">{downloadParts.map((part, index) => {
+        const requested = part.every(photo => requestedDownloadIds.has(photo.id));
+        return <button key={part.map(photo => photo.id).join(':')} className="button secondary download-part" disabled={busy || !downloadReady} aria-label={`${index + 1}/${downloadParts.length} 묶음 ${requested ? '다시 다운로드' : '다운로드'}`} onClick={() => void downloadBatch(part.map(photo => photo.id), index + 1)}><Icon name={requested ? 'retry' : 'download'} /><strong>{index + 1}/{downloadParts.length}</strong><span>{part.length}</span><span>{formatBytes(part.reduce((sum, photo) => sum + photo.size, 0))}</span>{requested && <span className="visually-hidden">다운로드 요청됨</span>}</button>;
+      })}</div>}<div className="download-capacity"><span>{formatBytes(downloadSize)}</span>{downloadParts.length > 1 && <span>{downloadParts.length} 묶음</span>}{downloadParts.length === 1 && (normalizedDownloadIds?.length ?? 0) > 1 && <span>/ {formatBytes(MAX_ARCHIVE_BYTES)}</span>}</div>
       {busy && progress && <div className="queue-progress"><progress value={progress.done} max={progress.total} aria-label="다운로드 진행" /><output>{progress.done}/{progress.total}</output></div>}
       <div className="download-list">{(normalizedDownloadIds ?? []).map(id => photos.find(photo => photo.id === id)).filter((photo): photo is Photo => !!photo).map(photo => <div key={photo.id} className="download-item"><div className="download-thumb"><Preview photo={photo} /></div><div className="download-item-info"><strong>{photo.name}</strong><small>{formatBytes(photo.size)}</small><span role="img" aria-label={photo.receivedBy.includes(member) ? '받았음 확인' : photo.requestedBy.includes(member) ? '다운로드 요청됨' : '아직 요청하지 않음'}><Icon name={photo.receivedBy.includes(member) ? 'check' : photo.requestedBy.includes(member) ? 'download' : 'image'} size={16} /></span></div><button className="icon-button" aria-label={`${photo.name} 다운로드 선택 해제`} disabled={busy} onClick={() => setDownloadIds(current => current?.filter(id => representativeDownloadIds([id], stacks)[0] !== photo.id) ?? null)}><Icon name="close" /></button><div className="receipt-actions">{photo.requestedBy.includes(member) && <><button className="icon-button" disabled={busy} aria-label="받았음 확인" aria-pressed={photo.receivedBy.includes(member)} onClick={() => void mutate(() => downloadState([photo.id], photo.receivedBy.includes(member) ? 'reset' : 'received'))}><Icon name="check" /></button><button className="icon-button" disabled={busy} aria-label="기록 되돌리기" onClick={() => void mutate(() => downloadState([photo.id], 'reset'))}><Icon name="retry" /></button></>}</div><button className="icon-button outlined" disabled={busy || !downloadReady} aria-label={`${photo.name} 원본 다운로드`} onClick={() => void download(photo)}><Icon name="download" /></button></div>)}</div></Modal>}
     {managerOpen && <Modal label="공유보관함 관리" onClose={dismissManager} className="download-dialog shared-dialog"><header className="dialog-header"><div><h2>{incomingInvite ? '참여' : !remote ? '로그인' : { create: '새 보관함', join: '초대 참여', invite: '친구 초대', settings: '보관함 설정', account: '계정' }[managerView]}</h2>{!incomingInvite && remote?.album && ['invite', 'settings'].includes(managerView) && <strong className="dialog-context">{remote.album.title}</strong>}</div><button className="icon-button" disabled={busy} aria-label="공유보관함 관리 닫기" onClick={dismissManager}><Icon name="close" /></button></header>
