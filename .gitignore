@@ -21,3 +21,5 @@ target/
 # Python development harness
 __pycache__/
 *.pyc
+
+/README.md
